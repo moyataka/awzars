@@ -1,0 +1,138 @@
+[package]
+name = "awzars"
+version = "0.1.0"
+edition = "2021"
+authors = ["paul <awzars.net141@passmail.net>"]
+license = "MIT OR Apache-2.0"
+description = "Modern Rust-based Azure AD to AWS credential federation"
+keywords = ["aws", "azure", "saml", "authentication", "cli"]
+categories = ["command-line-utilities", "authentication"]
+
+[dependencies]
+# Async runtime — explicitly trimmed feature set. We do not use tokio::process
+# or tokio::signal directly; transitive deps that need them pull them in via
+# their own feature spec.
+tokio = { version = "1.40", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "io-util",
+    "io-std",
+    "sync",
+    "fs",
+    "parking_lot",
+] }
+
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive", "color", "env"] }
+
+# Browser automation
+chromiumoxide = { version = "0.9", default-features = false, features = ["rustls", "fetcher", "zip8"] }
+futures = "0.3"
+
+# AWS SDK with rustls. Use `default-https-client` rather than the legacy
+# `rustls` feature flag — the latter pulls rustls 0.21 via `legacy-rustls-ring`,
+# while `default-https-client` routes through the modern `rustls-aws-lc`
+# path on the current rustls 0.23 line.
+aws-config = { version = "1.5", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sts = { version = "1.50", default-features = false, features = ["default-https-client", "rt-tokio"] }
+
+# Secure storage. v3 has no default features — backends must be opted into
+# per platform. We pick the native, persistent backend on each OS:
+#   * Linux: dbus-secret-service (sync), with `crypto-rust` so we don't drag
+#     in OpenSSL just to encrypt the D-Bus session, and `vendored` so
+#     libdbus is built from source (no system `libdbus-1-dev` required —
+#     critical for the static musl build advertised in the README).
+#   * macOS: Apple Security Framework / Keychain.
+#   * Windows: Credential Manager (out of awzars's stated targets, but cheap
+#     to enable so a Windows-curious developer can build).
+keyring = { version = "3.6", default-features = false, features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+    "vendored",
+] }
+
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Serialization
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# HTTP client with rustls (no native-tls)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# SAML/XML parsing
+roxmltree = "0.21"
+base64 = "0.22"
+flate2 = "1.0"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "2.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Configuration directories
+directories = "6.0"
+
+# Secure memory
+zeroize = { version = "1.8", features = ["derive"] }
+
+# Cookie store encryption
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
+
+# URL parsing/validation
+url = "2"
+
+# Interactive prompts
+dialoguer = "0.12"
+
+# URL encoding
+urlencoding = "2.1"
+
+# Regex for parsing
+regex = "1.10"
+
+# Lazy static
+once_cell = "1.19"
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4"] }
+
+# Ephemeral directories (browser data cleanup)
+tempfile = "3.9"
+
+# Per-profile password lock: Argon2id for verifier hashing.
+argon2 = "0.5"
+
+# Per-profile password lock: getsid() / kill(sid, 0) for session-scoped unlock tokens.
+# `term` adds termios bindings used to disable ECHO when reading a password
+# from /dev/tty (credential-process can't use dialoguer because AWS CLI pipes
+# the subprocess stderr that dialoguer reads from).
+nix = { version = "0.30", default-features = false, features = ["process", "signal", "term"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+# For static linking with musl
+panic = "abort"
+
+# Static build profile
+[profile.static]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

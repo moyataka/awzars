@@ -1,0 +1,12 @@
+/target
+
+# Secrets / environment
+.env
+.env.*
+*.pem
+*.key
+
+# Editor / OS metadata
+.idea/
+.vscode/
+.DS_Store
