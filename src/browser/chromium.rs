@@ -275,6 +275,10 @@ impl AzureLoginBrowser {
     ) -> Result<Self> {
         let mut config_builder = BrowserConfig::builder().request_timeout(Duration::from_secs(120));
 
+        if let Some(exe) = find_chrome_executable() {
+            config_builder = config_builder.chrome_executable(exe);
+        }
+
         let mut ephemeral_dir = None;
 
         if remember_me {
@@ -341,7 +345,7 @@ impl AzureLoginBrowser {
                     ))
                 } else {
                     AwzarsError::Browser(format!(
-                        "Failed to launch browser: {}. Install Chrome/Chromium or set CHROME_REMOTE_URL to connect to a remote Chrome instance.",
+                        "Failed to launch browser: {}. Install Chrome/Chromium, set CHROME=/path/to/chrome to point to your installation, or set CHROME_REMOTE_URL to connect to a remote Chrome instance.",
                         e
                     ))
                 }
@@ -790,6 +794,29 @@ fn redact_ws_url(u: &url::Url) -> String {
 use crate::auth::azure::protocol::{
     build_azure_login_url, extract_saml_from_html, is_aws_redirect_url,
 };
+
+/// Return a Chrome/Chromium executable path that chromiumoxide's built-in
+/// detection misses — specifically user-level macOS installs under ~/Applications.
+/// Returns None to let chromiumoxide fall through to its own detection logic.
+fn find_chrome_executable() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        let candidates = [
+            "Google Chrome.app/Contents/MacOS/Google Chrome",
+            "Chromium.app/Contents/MacOS/Chromium",
+            "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ];
+        for rel in &candidates {
+            let path = std::path::Path::new(&home).join("Applications").join(rel);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 
 #[cfg(test)]
 mod tests {
