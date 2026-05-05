@@ -338,10 +338,20 @@ impl AzureLoginBrowser {
                         profile, profile
                     ))
                 } else if err_str.contains("Permission denied") {
+                    let chrome_hint = std::env::var("CHROME")
+                        .ok()
+                        .filter(|v| v.ends_with(".app"))
+                        .map(|v| format!(
+                            " CHROME is set to a .app bundle; point it to the binary instead, e.g. \
+                             CHROME=\"{}/Contents/MacOS/...\".",
+                            v
+                        ))
+                        .unwrap_or_default();
                     AwzarsError::Browser(format!(
-                        "Permission denied accessing Chrome data directory for profile '{}'. \
-                         Check permissions on the chromium data directory or re-run `awzars login --remember-me` to reinitialize.",
-                        profile
+                        "Permission denied launching Chrome for profile '{}'.{} \
+                         If you previously ran awzars with sudo, fix with: \
+                         sudo chown -R \"$USER\" ~/.awzars/chromium/{}",
+                        profile, chrome_hint, profile
                     ))
                 } else {
                     AwzarsError::Browser(format!(
@@ -795,25 +805,93 @@ use crate::auth::azure::protocol::{
     build_azure_login_url, extract_saml_from_html, is_aws_redirect_url,
 };
 
-/// Return a Chrome/Chromium executable path that chromiumoxide's built-in
-/// detection misses — specifically user-level macOS installs under ~/Applications.
-/// Returns None to let chromiumoxide fall through to its own detection logic.
+/// Resolve the Chrome executable to use, bypassing chromiumoxide's built-in detection
+/// which can find broken PATH wrappers (e.g. Homebrew Cask installs whose .app was
+/// never moved to /Applications) before checking the real app locations.
+///
+/// Also handles CHROME env var pointing to a .app bundle instead of the binary inside.
 fn find_chrome_executable() -> Option<std::path::PathBuf> {
+    // Handle CHROME env var ourselves before chromiumoxide reads it.
+    // If it points to a .app bundle, resolve to the binary inside the bundle.
+    if let Ok(val) = std::env::var("CHROME") {
+        let p = std::path::PathBuf::from(&val);
+        if p.extension().and_then(|e| e.to_str()) == Some("app") {
+            // .app bundle: derive binary path as <bundle>/Contents/MacOS/<AppName>
+            if let Some(stem) = p.file_stem() {
+                let bin = p.join("Contents/MacOS").join(stem);
+                if bin.exists() {
+                    tracing::debug!("CHROME .app bundle resolved to {}", bin.display());
+                    return Some(bin);
+                }
+            }
+            // Bundle exists but binary not inside — fall through to system detection
+            // so the user still gets a browser if one is installed normally.
+            tracing::warn!(
+                "CHROME={} is a .app bundle but the binary was not found inside; \
+                 set CHROME to the binary path, e.g. \"{}/Contents/MacOS/...\"",
+                val, val
+            );
+        } else if p.exists() {
+            return Some(p);
+        }
+    }
+
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var_os("HOME")?;
-        let candidates = [
-            "Google Chrome.app/Contents/MacOS/Google Chrome",
-            "Chromium.app/Contents/MacOS/Chromium",
-            "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        // Check /Applications and ~/Applications explicitly. This runs before
+        // chromiumoxide's `which chromium` so that a broken Homebrew Cask wrapper
+        // (which points to /Applications/Chromium.app when that path is missing)
+        // is never used when a working browser is installed at the standard location.
+        let system_candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
         ];
-        for rel in &candidates {
-            let path = std::path::Path::new(&home).join("Applications").join(rel);
-            if path.exists() {
-                return Some(path);
+        for path in &system_candidates {
+            let p = std::path::Path::new(path);
+            if p.exists() {
+                return Some(p.to_path_buf());
+            }
+        }
+
+        if let Some(home) = std::env::var_os("HOME") {
+            let user_candidates = [
+                "Google Chrome.app/Contents/MacOS/Google Chrome",
+                "Chromium.app/Contents/MacOS/Chromium",
+                "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            ];
+            for rel in &user_candidates {
+                let path = std::path::Path::new(&home).join("Applications").join(rel);
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+        }
+
+        // Homebrew Cask: the .app may still be in the Caskroom staging directory
+        // if it was never moved to /Applications (e.g. user cancelled the prompt).
+        let cask_apps: &[(&str, &str)] = &[
+            (
+                "/opt/homebrew/Caskroom/google-chrome",
+                "Google Chrome.app/Contents/MacOS/Google Chrome",
+            ),
+            (
+                "/opt/homebrew/Caskroom/chromium",
+                "Chromium.app/Contents/MacOS/Chromium",
+            ),
+        ];
+        for (cask_dir, app_rel) in cask_apps {
+            if let Ok(entries) = std::fs::read_dir(cask_dir) {
+                for entry in entries.flatten() {
+                    let candidate = entry.path().join(app_rel);
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
             }
         }
     }
+
     None
 }
 
