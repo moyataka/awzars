@@ -201,23 +201,29 @@ cargo audit               # advisory scanner
 
 ## Install
 
-### Pre-built binary (Linux x86_64, no dependencies)
+### Pre-built binary
+
+**macOS (Apple Silicon M1/M2/M3)**
+
+```bash
+VERSION=$(curl -fsSL https://api.github.com/repos/moyataka/awzars/releases/latest \
+  | grep '"tag_name"' | cut -d'"' -f4)
+curl -fsSL "https://github.com/moyataka/awzars/releases/download/${VERSION}/awzars-${VERSION}-aarch64-apple-darwin.tar.gz" \
+  | tar -xz
+sudo install -m 0755 awzars /usr/local/bin/awzars
+```
+
+**Linux x86\_64 (static, no GLIBC dependency)**
 
 ```bash
 VERSION=$(curl -fsSL https://api.github.com/repos/moyataka/awzars/releases/latest \
   | grep '"tag_name"' | cut -d'"' -f4)
 curl -fsSL "https://github.com/moyataka/awzars/releases/download/${VERSION}/awzars-${VERSION}-x86_64-unknown-linux-musl.tar.gz" \
   | tar -xz
-
-# System-wide (requires sudo)
 sudo install -m 0755 awzars /usr/local/bin/awzars
-
-# Per-user, no sudo
-install -m 0755 -D awzars ~/.local/bin/awzars
 ```
 
-The musl-linked binary has no GLIBC dependency and runs unmodified on Alpine,
-distroless, and any glibc Linux host.
+The Linux musl binary runs unmodified on Alpine, distroless, and any glibc host.
 
 ### From source
 
