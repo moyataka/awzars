@@ -23,6 +23,23 @@ target/x86_64-unknown-linux-musl/release/awzars
 cross build --release --target x86_64-unknown-linux-musl
 ```
 
+## Release
+
+GitHub releases use the naming convention `awzars-v{version}-{target}.tar.gz`.
+
+```bash
+# Package (example for x86_64 Linux musl)
+cd target/x86_64-unknown-linux-musl/release
+tar czf awzars-v1.0.1-x86_64-unknown-linux-musl.tar.gz awzars
+
+# Upload to existing tag
+gh release upload v1.0.1 /path/to/awzars-v1.0.1-x86_64-unknown-linux-musl.tar.gz
+```
+
+Current release targets:
+- `x86_64-unknown-linux-musl` — built on Linux with `cargo zigbuild`
+- `aarch64-apple-darwin` — built on macOS Apple Silicon
+
 ## Usage
 
 ```bash
