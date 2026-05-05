@@ -201,16 +201,37 @@ cargo audit               # advisory scanner
 
 ## Install
 
-```bash
-# Static binary, system-wide
-sudo cp target/x86_64-unknown-linux-musl/release/awzars /usr/local/bin/
-sudo chmod 0755 /usr/local/bin/awzars
+### Pre-built binary (Linux x86_64, no dependencies)
 
-# Or per-user (no sudo)
+```bash
+VERSION=$(curl -fsSL https://api.github.com/repos/moyataka/awzars/releases/latest \
+  | grep '"tag_name"' | cut -d'"' -f4)
+curl -fsSL "https://github.com/moyataka/awzars/releases/download/${VERSION}/awzars-${VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+  | tar -xz
+
+# System-wide (requires sudo)
+sudo install -m 0755 awzars /usr/local/bin/awzars
+
+# Per-user, no sudo
+install -m 0755 -D awzars ~/.local/bin/awzars
+```
+
+The musl-linked binary has no GLIBC dependency and runs unmodified on Alpine,
+distroless, and any glibc Linux host.
+
+### From source
+
+After building (see **Build from source** above):
+
+```bash
+# System-wide
+sudo install -m 0755 target/x86_64-unknown-linux-musl/release/awzars /usr/local/bin/awzars
+
+# Per-user, no sudo
 install -m 0755 -D target/x86_64-unknown-linux-musl/release/awzars ~/.local/bin/awzars
 ```
 
-Verify:
+### Verify
 
 ```bash
 awzars --version
