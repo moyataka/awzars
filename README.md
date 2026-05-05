@@ -1,5 +1,9 @@
 # awzars
 
+<p align="center">
+  <img src="assets/logo.jpeg" alt="awzars logo" width="200"/>
+</p>
+
 A Rust alternative to [aws-azure-login](https://github.com/aws-azure-login/aws-azure-login) for the same job: Azure AD / Entra ID single sign-on into AWS.
 
 Automates Azure AD authentication and exchanges SAML assertions for AWS
