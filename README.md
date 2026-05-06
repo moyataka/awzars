@@ -207,23 +207,29 @@ cargo audit               # advisory scanner
 
 ### Pre-built binary
 
+Each snippet resolves to the latest release that actually ships that
+platform's asset, so a release containing only one of the two binaries is
+handled correctly.
+
 **macOS (Apple Silicon M1/M2/M3)**
 
 ```bash
-VERSION=$(curl -fsSL https://api.github.com/repos/moyataka/awzars/releases/latest \
-  | grep '"tag_name"' | cut -d'"' -f4)
-curl -fsSL "https://github.com/moyataka/awzars/releases/download/${VERSION}/awzars-${VERSION}-aarch64-apple-darwin.tar.gz" \
-  | tar -xz
+URL=$(curl -fsSL https://api.github.com/repos/moyataka/awzars/releases \
+  | grep '"browser_download_url".*aarch64-apple-darwin' \
+  | head -1 | cut -d'"' -f4)
+[ -n "$URL" ] || { echo "no macOS Apple Silicon asset in recent releases"; exit 1; }
+curl -fsSL "$URL" | tar -xz
 sudo install -m 0755 awzars /usr/local/bin/awzars
 ```
 
 **Linux x86\_64 (static, no GLIBC dependency)**
 
 ```bash
-VERSION=$(curl -fsSL https://api.github.com/repos/moyataka/awzars/releases/latest \
-  | grep '"tag_name"' | cut -d'"' -f4)
-curl -fsSL "https://github.com/moyataka/awzars/releases/download/${VERSION}/awzars-${VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-  | tar -xz
+URL=$(curl -fsSL https://api.github.com/repos/moyataka/awzars/releases \
+  | grep '"browser_download_url".*x86_64-unknown-linux-musl' \
+  | head -1 | cut -d'"' -f4)
+[ -n "$URL" ] || { echo "no Linux x86_64 musl asset in recent releases"; exit 1; }
+curl -fsSL "$URL" | tar -xz
 sudo install -m 0755 awzars /usr/local/bin/awzars
 ```
 

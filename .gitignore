@@ -10,3 +10,7 @@
 .idea/
 .vscode/
 .DS_Store
+._awzars
+
+# Stray binary copy at repo root (not the cargo build under target/)
+/awzars

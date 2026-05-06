@@ -99,11 +99,20 @@ fn print_unlocked(profile_name: &str, token: &lock::UnlockToken) {
             + std::time::Duration::from_secs(token.created_at.saturating_add(token.ttl_secs)),
     );
     let ai = if token.allow_ai { "allowed" } else { "blocked" };
+    let raw_sid = lock::current_sid().ok();
+    let sid_note = match raw_sid {
+        Some(raw) if raw != token.sid => format!(
+            " [terminal session via TTY-owning ancestor; this process's getsid(0) = {}]",
+            raw
+        ),
+        _ => String::new(),
+    };
     println!(
-        "Profile '{}' unlocked for session {} until {} (AI access: {}).",
+        "Profile '{}' unlocked for terminal session {} until {} (AI access: {}).{}",
         profile_name,
         token.sid,
         expires_at.format("%Y-%m-%d %H:%M:%S %Z"),
         ai,
+        sid_note,
     );
 }

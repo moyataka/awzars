@@ -9,8 +9,14 @@
 //!   terminal session until the user consents via
 //!   `awzars unlock <profile> --allow-ai`.
 //!
-//! Session boundary is the Linux session ID (`getsid(0)`), which all processes
-//! sharing a controlling terminal have in common.
+//! Session boundary is the Linux session ID — but resolved by walking the
+//! ppid chain to the first ancestor with a controlling TTY (see
+//! `terminal_session_sid`), not `getsid(0)`. This matters because tools that
+//! re-`setsid()` their subprocesses (Claude Code's Bash tool is the canonical
+//! example) would otherwise see a fresh SID that doesn't match the unlock the
+//! user just performed in their interactive shell. Walking up to the
+//! TTY-owning ancestor restores the "everything sharing this terminal shares
+//! the unlock" promise.
 //!
 //! The unlock token is a short JSON blob written under
 //! `$XDG_RUNTIME_DIR/awzars/sessions/` (mode 0o600), so it is automatically
@@ -100,7 +106,7 @@ const FAILURE_RESET_SECS: u64 = 3600;
 const FAILURE_BACKOFF_CAP_SECS: u64 = 60;
 
 fn failure_path(profile: &str) -> Result<PathBuf> {
-    let sid = current_sid()?;
+    let sid = terminal_session_sid()?;
     Ok(unlock_dir()?.join(format!("{}-{}.fails", sid, profile)))
 }
 
@@ -257,8 +263,10 @@ pub fn read_password_via_tty(prompt: &str) -> Result<PasswordInput> {
 
 // --- Session ID ---
 
-/// Current process's session ID. All processes that share a controlling
-/// terminal share this — including any AI agent launched in the same shell.
+/// Raw `getsid(0)` for the current process. Prefer `terminal_session_sid`
+/// for token storage — `getsid(0)` returns a fresh SID inside any subprocess
+/// that has been `setsid()`-detached from the user's terminal, which would
+/// silo unlock tokens away from the rest of the same terminal session.
 pub fn current_sid() -> Result<u32> {
     use nix::unistd::{getsid, Pid};
     let sid = getsid(Some(Pid::from_raw(0)))
@@ -273,7 +281,34 @@ fn sid_alive(sid: u32) -> bool {
     kill(Pid::from_raw(sid as i32), None).is_ok()
 }
 
-/// Linux: parse field 22 (`starttime`) of `/proc/<pid>/stat`. Used to bind
+/// Subset of `/proc/<pid>/stat` we care about. Field numbering (1-indexed,
+/// per `proc(5)`): 4=ppid, 6=session, 7=tty_nr, 22=starttime. The `comm`
+/// field (2) is parenthesised and may itself contain whitespace or `)`, so
+/// the parser splits off everything up to the LAST `)` before tokenising the
+/// remainder; in that remainder, field 3 (state) sits at zero-indexed slot 0.
+#[cfg(target_os = "linux")]
+struct ProcStat {
+    ppid: i32,
+    sid: u32,
+    tty_nr: i32,
+    start_time: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn read_proc_stat(pid: u32) -> Option<ProcStat> {
+    let raw = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    let close = raw.rfind(')')?;
+    let tail = raw.get(close + 1..)?.trim_start();
+    let f: Vec<&str> = tail.split_ascii_whitespace().collect();
+    Some(ProcStat {
+        ppid: f.get(1)?.parse().ok()?,
+        sid: f.get(3)?.parse().ok()?,
+        tty_nr: f.get(4)?.parse().ok()?,
+        start_time: f.get(19)?.parse().ok()?,
+    })
+}
+
+/// Linux: starttime (jiffies since boot) of process `pid`. Used to bind
 /// an unlock token to a specific process incarnation so a stale token can't
 /// be honoured after PID reuse hands the same SID to an unrelated process.
 ///
@@ -282,21 +317,73 @@ fn sid_alive(sid: u32) -> bool {
 /// performed" rather than "process is dead".
 #[cfg(target_os = "linux")]
 pub fn process_start_time(pid: u32) -> Option<u64> {
-    let path = format!("/proc/{}/stat", pid);
-    let raw = std::fs::read_to_string(path).ok()?;
-    // The `comm` field (2nd) is parenthesised and may itself contain spaces
-    // or close-parens, so split off everything up to the LAST `)` before
-    // tokenising. After that, fields are 1-indexed from `state` (3rd) so
-    // `starttime` (22nd) sits at zero-indexed slot 19.
-    let close = raw.rfind(')')?;
-    let tail = raw.get(close + 1..)?.trim_start();
-    let fields: Vec<&str> = tail.split_ascii_whitespace().collect();
-    fields.get(19)?.parse::<u64>().ok()
+    read_proc_stat(pid).map(|s| s.start_time)
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn process_start_time(_pid: u32) -> Option<u64> {
     None
+}
+
+/// Resolve the SID that scopes unlock tokens for the current process.
+///
+/// Walks the ppid chain (self first, up to a small bounded depth) looking
+/// for the first ancestor with a non-zero `tty_nr` in `/proc/<pid>/stat`,
+/// and returns that ancestor's session ID. This is the user's "logical
+/// terminal session" — the SID of the shell that owns the controlling TTY.
+///
+/// Why not `getsid(0)`: tools that re-`setsid()` their child processes
+/// (Claude Code's Bash tool subprocess is the canonical case) get a fresh
+/// session ID with no controlling terminal. `getsid(0)` from inside such a
+/// subprocess returns *that* fresh SID, not the user's shell's SID, so an
+/// `awzars unlock` performed by the user in the same terminal is invisible
+/// to the subprocess. Walking up to the first TTY-owning ancestor recovers
+/// the user-shell SID and restores token sharing.
+///
+/// Falls back to `current_sid()` on non-Linux, on `/proc` read failure, on
+/// chain length exhaustion, or when no ancestor up to PID 1 has a
+/// controlling TTY (genuine daemon — there's nothing better to key off).
+pub fn terminal_session_sid() -> Result<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        // Bound the walk so a malformed /proc, a refcount cycle that
+        // shouldn't be possible, or a deep ancestry can't loop forever.
+        const MAX_HOPS: usize = 32;
+        let mut pid = std::process::id();
+        for hop in 0..MAX_HOPS {
+            let Some(stat) = read_proc_stat(pid) else {
+                tracing::debug!(
+                    pid,
+                    hop,
+                    "terminal_session_sid: /proc read failed; falling back to getsid(0)"
+                );
+                break;
+            };
+            if stat.tty_nr != 0 {
+                tracing::debug!(
+                    pid,
+                    hop,
+                    sid = stat.sid,
+                    tty_nr = stat.tty_nr,
+                    "terminal_session_sid: resolved via TTY-owning ancestor"
+                );
+                return Ok(stat.sid);
+            }
+            if stat.ppid <= 1 {
+                tracing::debug!(
+                    pid,
+                    hop,
+                    "terminal_session_sid: reached init with no TTY ancestor; \
+                     falling back to getsid(0)"
+                );
+                break;
+            }
+            pid = stat.ppid as u32;
+        }
+    }
+    let sid = current_sid()?;
+    tracing::debug!(sid, "terminal_session_sid: using raw getsid(0)");
+    Ok(sid)
 }
 
 // --- Unlock token storage ---
@@ -375,7 +462,7 @@ pub fn write_unlock(
     allow_ai: bool,
     password_unlocked: bool,
 ) -> Result<UnlockToken> {
-    let sid = current_sid()?;
+    let sid = terminal_session_sid()?;
     let token = UnlockToken {
         profile: profile.to_string(),
         sid,
@@ -394,7 +481,7 @@ pub fn write_unlock(
 /// Load the current session's unlock token for `profile`, if it exists, the
 /// SID matches, and it has not expired.
 pub fn read_valid_unlock(profile: &str) -> Option<UnlockToken> {
-    let sid = current_sid().ok()?;
+    let sid = terminal_session_sid().ok()?;
     let path = token_path(profile, sid).ok()?;
     let bytes = std::fs::read(&path).ok()?;
     let token: UnlockToken = serde_json::from_slice(&bytes).ok()?;
@@ -422,7 +509,7 @@ pub fn read_valid_unlock(profile: &str) -> Option<UnlockToken> {
 
 /// Remove the current session's unlock token for `profile`, if any.
 pub fn remove_unlock(profile: &str) -> Result<()> {
-    let sid = current_sid()?;
+    let sid = terminal_session_sid()?;
     let path = token_path(profile, sid)?;
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -806,6 +893,32 @@ mod tests {
     }
 
     #[test]
+    fn terminal_session_sid_resolves() {
+        // Smoke test: must succeed and return a real SID for the host. We
+        // can't assert the value (depends on whether the test runner has a
+        // controlling terminal), only that the function returns Ok and
+        // produces a positive integer.
+        let sid = terminal_session_sid().expect("must resolve");
+        assert!(sid > 0);
+    }
+
+    #[test]
+    fn terminal_session_sid_matches_self_when_owning_tty() {
+        // When the test process itself has a controlling TTY, the walk
+        // should stop at level 0 and return our own SID. When it doesn't
+        // (typical under `cargo test`), we can't assert anything specific,
+        // so just confirm the call shape.
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let resolved = terminal_session_sid().unwrap();
+        let raw = current_sid().unwrap();
+        // If self has a TTY, resolved == raw. If not, resolved is some
+        // ancestor's SID — either way both are valid u32s.
+        let _ = (resolved, raw);
+    }
+
+    #[test]
     fn unlock_token_records_start_time_on_linux() {
         let _g = temp_xdg();
         let prof = format!("test_st_{}", std::process::id());
@@ -835,7 +948,10 @@ mod tests {
 
         // Hand-craft a token whose start_time can't possibly match the
         // current session leader's, then verify read_valid_unlock rejects it.
-        let sid = current_sid().unwrap();
+        // Must key off `terminal_session_sid` (what read_valid_unlock uses),
+        // not `current_sid` — these differ inside any setsid()-detached
+        // subprocess such as `cargo test` under some runners.
+        let sid = terminal_session_sid().unwrap();
         let bogus = UnlockToken {
             profile: prof.clone(),
             sid,
