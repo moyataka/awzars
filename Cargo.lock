@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "awzars"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "argon2",
  "aws-config",
