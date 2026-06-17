@@ -71,7 +71,7 @@ credential_process = /usr/local/bin/awzars credential-process --profile work
 
 ### credential-process
 
-`credential-process` is designed for AWS CLI/SDK integration. It is always non-interactive:
+`credential-process` is designed for AWS CLI/SDK integration. The browser flow is always non-interactive. Password prompts for locked profiles read from `/dev/tty` so they fire under AWS CLI's piped stdio. AI consent does *not* prompt here — refuses with `AiContextBlocked` pointing at `awzars unlock --allow-ai`.
 
 - **Defaults to headless + remember-me**: When credentials expire, it automatically attempts silent headless re-authentication using saved browser cookies (no config needed)
 - **Pre-flight check**: Before launching a browser, verifies a session exists. Returns a clear error if no prior `awzars login --remember-me` session is found
@@ -161,7 +161,7 @@ awzars unlock             # Unlock a locked profile (or grant AI consent on an u
 awzars lock               # Drop this session's unlock token for a profile
 ```
 
-Global options: `--profile` (default: "default"), `-v`/`-vv`/`-vvv`, `--quiet`, `--config-dir` (env: `AWZARS_CONFIG_DIR`)
+Global options: `--profile` (default: "default"), `-v`/`-vv`/`-vvv`, `--quiet`, `--config-dir` (env: `AWZARS_CONFIG_DIR`). Env-only: `AWZARS_SESSION_ID` (`[A-Za-z0-9_]{1,64}`) overrides the unlock token's session scope, for detached/headless/CI contexts where no controlling terminal sits in the process ancestry.
 
 Login options: `--role-arn`, `--azure-tenant`, `--azure-app`, `--session-duration`, `--headless`, `--no-sandbox`, `--force-refresh`, `--output` (text/json/table), `--credential-process`, `--show-secrets`, `--remember-me`, `--allow-insecure-remote-chrome`, `--session-remember` (persist AI consent for the session; default re-prompts every call)
 
@@ -173,7 +173,7 @@ Delete-profile options: `--yes` (skip confirmation prompt). Cleans up the awzars
 
 Set-password options: `--remove` (clear the lock; still requires the old password). TTY-only; refuses if stdin is not a terminal so passwords can never be piped in. Argon2id PHC string lives in `~/.awzars/config.toml` under the profile entry. No minimum password length is enforced — typing speed is prioritized, with the dialoguer confirmation step (entered twice) as the only safety net against typos.
 
-Unlock options: `--allow-ai` (permit AI agents in this session — `CLAUDECODE` / `AI_AGENT` env markers — to use the credentials), `--ttl-hours <N>` (override the default 8h; soft-capped at 24h, raise to the 720h / 30-day hard cap with `--allow-long-ttl`), `--allow-long-ttl` (opt-in for `--ttl-hours > 24`). For password-locked profiles the command prompts for the password; for unlocked profiles it only does anything when `--allow-ai` is passed (y/N consent). TTY-only.
+Unlock options: `--allow-ai` (permit AI agents in this session — `CLAUDECODE` / `AI_AGENT` env markers — to use the credentials), `--ttl-hours <N>` (override the default 8h; soft-capped at 24h, raise to the 720h / 30-day hard cap with `--allow-long-ttl`), `--allow-long-ttl` (opt-in for `--ttl-hours > 24`), `--no-expire` (skip time expiry — token lives as long as the session does, dies on logout; conflicts with `--ttl-hours` / `--allow-long-ttl`). Password-locked profiles require a TTY and prompt for the password. Unlocked profiles only need `--allow-ai` — TTY not required, so it can be invoked through Claude Code's Bash tool. See `SECURITY_AUDIT.md` for the tradeoff.
 
 Lock options: none. Idempotent: removes the current session's unlock token if any.
 
@@ -184,16 +184,16 @@ Opt-in per-profile gate that fences credential-producing operations (`login`, `c
 **Two protection levels** (independent — either, both, or neither apply per profile):
 
 1. **Password lock**: enabled by `awzars set-password <profile>`. Stores an Argon2id PHC string in the profile entry. Every credential operation in a fresh terminal session prompts for the password (or refuses, if non-interactive — see below).
-2. **AI consent**: applies whenever the environment contains a known AI marker (`CLAUDECODE` or `AI_AGENT` by default, configurable via the profile's `lock_ai_markers`). Even *unlocked* profiles refuse credential operations under AI until the user consents. Default is **ask every invocation** during interactive `login` / `list-roles` — every call gets its own y/N. Pass `--session-remember` (or run `awzars unlock <profile> --allow-ai` once) to persist the answer for the session. `credential-process` inherits the parent shell's TTY when invoked from an interactive shell, so it inline-prompts for the password under those conditions; AI markers still refuse the inline prompt and require an explicit prior `awzars unlock --allow-ai`.
+2. **AI consent**: applies whenever the environment contains a known AI marker (`CLAUDECODE` or `AI_AGENT` by default, configurable via the profile's `lock_ai_markers`). Even *unlocked* profiles refuse credential operations under AI until the user consents. The y/N prompt is gated on `stdin().is_terminal()`: fires per call during interactive `login` / `list-roles` (pass `--session-remember` to persist), skipped under piped stdin (AWS CLI's `credential_process`, Claude Code's Bash tool) — those refuse with `AiContextBlocked` pointing at `awzars unlock --allow-ai`. Password prompts for locked profiles are separate (read from `/dev/tty`). Locked + AI refuses without any prompt; see `SECURITY_AUDIT.md` for rationale.
 
-**Session boundary** is the Linux session ID (`getsid(0)`) — every process under the same controlling terminal shares the unlock. Token is a JSON file at `$XDG_RUNTIME_DIR/awzars/sessions/<sid>-<profile>.json` (mode 0o600), auto-reaped on logout (tmpfs). Falls back to `~/.cache/awzars/sessions/` when XDG_RUNTIME_DIR is unset.
+**Session boundary** is resolved by priority: (1) `AWZARS_SESSION_ID` (`[A-Za-z0-9_]{1,64}`, explicit override → `env-<key>`); (2) `CLAUDE_CODE_SESSION_ID` (the Claude conversation id → `claude-<hex>`) — exported into every command Claude spawns, so an `awzars unlock` run from the Claude prompt and the agent's later AWS calls share one scope even though each command runs in its own `setsid`/PTY session (this is what fixes "unlock doesn't work under claude agents"); (3) the controlling-terminal session via a `/proc` ancestry walk (`sid-<n>`, distinct per terminal / zellij pane), falling back to `getsid(0)`. Token is a JSON file at `$XDG_RUNTIME_DIR/awzars/sessions/<scope_key>-<profile>.json` (mode 0o600), auto-reaped on logout (tmpfs); falls back to `~/.cache/awzars/sessions/` when XDG_RUNTIME_DIR is unset. The Claude-conversation scope means the agent itself shares the unlock, so an unlocked profile is no barrier to an agent allowed to run `awzars unlock --allow-ai` — **password-lock the profile for a hard gate** (a password unlock needs a real TTY the agent can't supply). See the L-9 entry in `SECURITY_AUDIT.md`.
 
 **TTL**: default 8 h. Override per-profile (`Profile.lock_ttl_hours`) or per-unlock (`--ttl-hours`, soft-capped at 24 h; pass `--allow-long-ttl` to extend up to the 720 h / 30-day hard ceiling). The profile-stored override is *not* gated — it is treated as a deliberate one-time edit; the per-call CLI ratchet is the one that needs an opt-in.
 
 **Gate placement** (`crate::auth::lock::enforce(name, profile, allow_inline_prompt, persist_consent)`):
 
 - `awzars login [--session-remember]`: TTY-attached. Locked profile + no AI: inline password prompt → token persists for TTL. Unlocked profile + AI: y/N consent every call by default; `--session-remember` writes a token after the first "yes". Locked profile + AI: refuse, user must run `awzars unlock --allow-ai`.
-- `awzars credential-process`: inherits the parent shell's stdin. When stdin is a TTY (typical when invoked by AWS CLI from an interactive shell), inline-prompts for the password and writes a session unlock token on success. Refuses without prompting when stdin is not a TTY (CI / scripted callers) or AI markers are present.
+- `awzars credential-process`: Locked + no AI: opens `/dev/tty` for the password prompt → writes a session token. Unlocked + AI: refuses (`AiContextBlocked`); user runs `awzars unlock --allow-ai`. Locked + AI: refuses without prompt; user runs `awzars unlock --allow-ai` first. Locked + no AI also refuses when `/dev/tty` is unreachable (CI / scripted callers / genuine daemons).
 - `awzars list-roles [--session-remember]`: same shape as `login`.
 
 **Honest limit**: AI-marker detection stops *casual* leakage (you forgot you'd unlocked, then opened claude in the same shell). An adversarial AI that runs `unset CLAUDECODE` before invoking `aws` defeats it. For stronger protection, layer Claude Code's own `permissions` / `hooks` in `~/.claude/settings.json` — e.g. deny `awzars credential-process` outright or require per-call user approval. Awzars makes the casual path safe and the malicious path obvious; the AI tool's own policy layer is where to harden against the malicious case.
@@ -218,7 +218,7 @@ Schema additions on `Profile` (all `Option<_>`, omitted when unset): `lock_verif
 - **dialoguer**: Interactive prompts (configure, remember-me prompt)
 - **tempfile**: Ephemeral browser data directories (auto-cleaned on drop)
 - **argon2**: Argon2id password hashing for the per-profile lock verifier
-- **nix**: `getsid()` / `kill(sid, 0)` for session-scoped unlock tokens
+- **nix**: `getsid()` / `kill(sid, 0)` for session-scoped unlock tokens (the `sid-` scope; its session id is resolved by walking `/proc` up to the controlling-terminal ancestor — see Profile Locking / L-9)
 
 ## Security
 
@@ -248,6 +248,8 @@ Schema additions on `Profile` (all `Option<_>`, omitted when unset): `lock_verif
 ## Configuration
 
 Stored in `~/.awzars/config.toml`. Top-level field `aws_config_path` (optional string) overrides the default `~/.aws/config` path used by the TUI. Chromium persistent sessions (from `--remember-me`) stored in `~/.awzars/chromium/<profile>/`.
+
+**AWS region for STS**: the per-profile `region` field is the region used for the `AssumeRoleWithSAML` call. Resolution precedence (`auth::aws::sts::build_region_provider`): profile `region` → AWS default chain (`AWS_REGION` / `AWS_DEFAULT_REGION`, `~/.aws/config`, IMDS) → `us-east-1` fallback. So a region set only in `~/.awzars/config.toml` is honored (it was previously parsed/stored but ignored by STS), and the call never fails purely for lack of a configured region. The profile `region` takes precedence over the `AWS_REGION` env var because it is an explicit awzars-profile setting; blank/whitespace values are treated as unset.
 
 ## Cookie Store (Remote → Local Session Transfer)
 
@@ -383,5 +385,5 @@ awzars login
 4. Extract SAMLResponse from verified AWS redirect page only
 5. **Shut down the browser** (graceful CDP close before any further processing — avoids spurious chromiumoxide WARN messages and prevents the AWS role-selection page from appearing live alongside the terminal TUI selector)
 6. Parse roles from assertion, validate issuer/audience/recipient/time-window
-7. Call STS AssumeRoleWithSAML
+7. Call STS AssumeRoleWithSAML (region resolved as profile `region` → AWS default chain → `us-east-1` fallback)
 8. Cache credentials in memory and store in keychain

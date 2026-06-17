@@ -10,3 +10,7 @@
 .idea/
 .vscode/
 .DS_Store
+
+# Local working notes (not for commit)
+TASK.md
+REPORT.md
