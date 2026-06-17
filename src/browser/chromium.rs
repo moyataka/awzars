@@ -829,7 +829,8 @@ fn find_chrome_executable() -> Option<std::path::PathBuf> {
             tracing::warn!(
                 "CHROME={} is a .app bundle but the binary was not found inside; \
                  set CHROME to the binary path, e.g. \"{}/Contents/MacOS/...\"",
-                val, val
+                val,
+                val
             );
         } else if p.exists() {
             return Some(p);
@@ -894,7 +895,6 @@ fn find_chrome_executable() -> Option<std::path::PathBuf> {
 
     None
 }
-
 
 #[cfg(test)]
 mod tests {

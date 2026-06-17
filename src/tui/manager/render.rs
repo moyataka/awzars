@@ -367,19 +367,20 @@ impl ConfigManager {
             })
             .collect();
 
-        let list = List::new(items).block({
-            let title = match crate::tui::aws_config::resolve_aws_config_path(
-                self.config.aws_config_path.as_deref(),
-            ) {
-                Some(path) => format!(
-                    " AWS Profiles ({}) — {} ",
-                    self.aws_profiles.len(),
-                    path.display()
-                ),
-                None => format!(" AWS Profiles ({}) ", self.aws_profiles.len()),
-            };
-            Block::default().borders(Borders::ALL).title(title)
-        })
+        let list = List::new(items)
+            .block({
+                let title = match crate::tui::aws_config::resolve_aws_config_path(
+                    self.config.aws_config_path.as_deref(),
+                ) {
+                    Some(path) => format!(
+                        " AWS Profiles ({}) — {} ",
+                        self.aws_profiles.len(),
+                        path.display()
+                    ),
+                    None => format!(" AWS Profiles ({}) ", self.aws_profiles.len()),
+                };
+                Block::default().borders(Borders::ALL).title(title)
+            })
             .highlight_style(
                 Style::default()
                     .bg(Color::DarkGray)
@@ -585,7 +586,10 @@ impl ConfigManager {
             }
 
             // Show autocomplete suggestions below source_profile field
-            if nav_idx == AWS_IDX_SOURCE_PROFILE && field.editing && !form.source_suggestions.is_empty() {
+            if nav_idx == AWS_IDX_SOURCE_PROFILE
+                && field.editing
+                && !form.source_suggestions.is_empty()
+            {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "    AWS Profiles (Tab to accept):",

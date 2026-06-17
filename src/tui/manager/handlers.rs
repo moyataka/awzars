@@ -358,7 +358,9 @@ impl ConfigManager {
                     self.aws_profiles.push(entry);
                 }
 
-                if let Err(e) = save_aws_config(&self.aws_profiles, self.config.aws_config_path.as_deref()) {
+                if let Err(e) =
+                    save_aws_config(&self.aws_profiles, self.config.aws_config_path.as_deref())
+                {
                     self.status = Some((StatusLevel::Error, format!("Save failed: {}", e)));
                     return;
                 }
@@ -475,7 +477,8 @@ impl ConfigManager {
             ));
         }
 
-        if let Err(e) = save_aws_config(&self.aws_profiles, self.config.aws_config_path.as_deref()) {
+        if let Err(e) = save_aws_config(&self.aws_profiles, self.config.aws_config_path.as_deref())
+        {
             self.status = Some((StatusLevel::Error, format!("Save failed: {}", e)));
         } else {
             self.refresh_aws_list(&aws_entry.name);
@@ -595,7 +598,9 @@ impl ConfigManager {
                     }
                 } else {
                     self.aws_profiles.retain(|p| p.name != target);
-                    if let Err(e) = save_aws_config(&self.aws_profiles, self.config.aws_config_path.as_deref()) {
+                    if let Err(e) =
+                        save_aws_config(&self.aws_profiles, self.config.aws_config_path.as_deref())
+                    {
                         self.status = Some((StatusLevel::Error, format!("Save failed: {}", e)));
                     } else {
                         self.refresh_aws_list_after_delete();
