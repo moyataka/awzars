@@ -101,6 +101,7 @@ pub async fn execute(args: &Args) -> Result<()> {
         tenant_id: profile.azure.tenant_id.clone(),
         app_id_uri: profile.azure.app_id_uri.clone(),
         role_arn: Some(role_arn),
+        region: profile.region.clone(),
         session_duration: profile.azure.session_duration,
         headless,
         no_sandbox,

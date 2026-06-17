@@ -21,6 +21,9 @@ pub struct LoginParams {
     pub app_id_uri: String,
     /// If None and multiple roles are available, opens TUI selector.
     pub role_arn: Option<String>,
+    /// AWS region for the STS endpoint. Sourced from the awzars profile's
+    /// `region`; `None` defers to the AWS default chain, then `us-east-1`.
+    pub region: Option<String>,
     pub session_duration: i32,
     pub headless: bool,
     pub no_sandbox: bool,
@@ -47,8 +50,7 @@ pub async fn perform_login(params: &LoginParams) -> Result<LoginOutcome> {
     browser.shutdown().await;
     let saml_response = saml_result?;
 
-    let assertion =
-        SamlAssertion::parse(&saml_response, &params.tenant_id, &params.app_id_uri)?;
+    let assertion = SamlAssertion::parse(&saml_response, &params.tenant_id, &params.app_id_uri)?;
     let (role_arn, principal_arn) = select_role(&assertion, params.role_arn.as_deref())?;
 
     tracing::info!("Exchanging SAML assertion for AWS credentials");
@@ -57,6 +59,7 @@ pub async fn perform_login(params: &LoginParams) -> Result<LoginOutcome> {
         &role_arn,
         &principal_arn,
         params.session_duration,
+        params.region.clone(),
     )
     .await?;
 
@@ -238,6 +241,7 @@ pub async fn execute(args: &Args) -> Result<()> {
         tenant_id: tenant_id.clone(),
         app_id_uri: app_id_uri.clone(),
         role_arn,
+        region: profile.region.clone(),
         session_duration: login_args.session_duration,
         headless: login_args.headless,
         no_sandbox: login_args.no_sandbox,
