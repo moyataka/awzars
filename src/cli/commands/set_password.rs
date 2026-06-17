@@ -69,8 +69,8 @@ pub fn run(profile_name: &str, remove: bool) -> Result<()> {
     let _ = lock::remove_unlock(profile_name);
 
     println!(
-        "Password lock set on profile '{}'. Run `awzars unlock {}` in any \
-         terminal session before using credentials there.",
+        "Password lock set on profile '{}'. Run `awzars --profile {} unlock` \
+         in any terminal session before using credentials there.",
         profile_name, profile_name
     );
     Ok(())

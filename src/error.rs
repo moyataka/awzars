@@ -64,14 +64,15 @@ pub enum AwzarsError {
     Dialog(String),
 
     #[error(
-        "Profile '{profile}' is password-locked. Run `awzars unlock {profile}` \
-         interactively to unlock for this terminal session."
+        "Profile '{profile}' is password-locked. Run \
+         `awzars --profile {profile} unlock` interactively to unlock for this \
+         terminal session."
     )]
     LockedProfile { profile: String },
 
     #[error(
         "AI context detected ({marker}) for profile '{profile}'. Run \
-         `awzars unlock {profile} --allow-ai` interactively to grant AI access \
+         `awzars --profile {profile} unlock --allow-ai` to grant AI access \
          for this terminal session."
     )]
     AiContextBlocked { profile: String, marker: String },

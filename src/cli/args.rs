@@ -199,6 +199,14 @@ pub enum Command {
         /// tokens approach "always unlocked" semantics on shared hosts.
         #[arg(long)]
         allow_long_ttl: bool,
+
+        /// Skip the time-based expiration entirely. The unlock token lasts as
+        /// long as the terminal session does (auto-reaped on logout via tmpfs
+        /// and SID liveness check). No time fallback — a forgotten unlock on
+        /// a long-lived session has no safety net. Mutually exclusive with
+        /// `--ttl-hours` and `--allow-long-ttl`.
+        #[arg(long, conflicts_with_all = ["ttl_hours", "allow_long_ttl"])]
+        no_expire: bool,
     },
 
     /// Lock the profile in this terminal session (drops the unlock token).
