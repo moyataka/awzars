@@ -901,6 +901,7 @@ impl AwsProfileForm {
 
         Ok(AwsProfileEntry {
             name,
+            original_name: self.original_name.clone(),
             region: if region_val.is_empty() {
                 None
             } else {
