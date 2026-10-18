@@ -99,6 +99,7 @@ pub async fn execute(args: &Args) -> Result<()> {
     }
 
     let params = LoginParams {
+        quiet: args.quiet,
         profile_name: args.profile.clone(),
         tenant_id: profile.azure.tenant_id.clone(),
         app_id_uri: profile.azure.app_id_uri.clone(),

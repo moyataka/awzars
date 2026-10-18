@@ -227,7 +227,7 @@ impl ConfigManager {
 
         let result = match &action {
             PendingAction::SetPassword { name } => {
-                crate::cli::commands::set_password::run(name, false)
+                crate::cli::commands::set_password::run(name, false, false)
             }
         };
 

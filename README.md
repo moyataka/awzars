@@ -392,7 +392,7 @@ These work on every subcommand:
 |---|---|
 | `--profile <name>` | Pick an awzars profile (default: `default`) |
 | `-v` / `-vv` / `-vvv` | Tracing verbosity: `info` / `debug` / `trace` |
-| `--quiet` | Warn-and-up only (suppresses `info` logs even at `-v`) |
+| `--quiet` | Suppresses status text, text/table results, and logs below error; overrides `-v` and `RUST_LOG`. JSON output, required prompts, and the requested TUI remain available. |
 | `--config-dir <path>` | Override `~/.awzars/`; equivalent to env `AWZARS_CONFIG_DIR` |
 | `--output text\|json\|table` | Output shape for `login` and `list-roles` |
 

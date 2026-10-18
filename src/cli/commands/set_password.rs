@@ -6,7 +6,7 @@ use crate::error::{AwzarsError, Result};
 use std::io::IsTerminal;
 use zeroize::Zeroizing;
 
-pub fn run(profile_name: &str, remove: bool) -> Result<()> {
+pub fn run(profile_name: &str, remove: bool, quiet: bool) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         return Err(AwzarsError::LockRequiresTty);
     }
@@ -31,7 +31,9 @@ pub fn run(profile_name: &str, remove: bool) -> Result<()> {
             );
             lock::verify_password_or_fail(&old, &phc, profile_name)?;
         } else if remove {
-            println!("Profile '{}' is not password-locked.", profile_name);
+            if !quiet {
+                println!("Profile '{}' is not password-locked.", profile_name);
+            }
             return Ok(());
         }
     }
@@ -43,7 +45,9 @@ pub fn run(profile_name: &str, remove: bool) -> Result<()> {
         profile.lock_ai_markers = None;
         config.save()?;
         let _ = lock::remove_unlock(profile_name);
-        println!("Password lock removed from profile '{}'.", profile_name);
+        if !quiet {
+            println!("Password lock removed from profile '{}'.", profile_name);
+        }
         return Ok(());
     }
 
@@ -68,10 +72,12 @@ pub fn run(profile_name: &str, remove: bool) -> Result<()> {
     // must re-unlock with the new secret.
     let _ = lock::remove_unlock(profile_name);
 
-    println!(
-        "Password lock set on profile '{}'. Run `awzars --profile {} unlock` \
-         in any terminal session before using credentials there.",
-        profile_name, profile_name
-    );
+    if !quiet {
+        println!(
+            "Password lock set on profile '{}'. Run `awzars --profile {} unlock` \
+             in any terminal session before using credentials there.",
+            profile_name, profile_name
+        );
+    }
     Ok(())
 }

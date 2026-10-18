@@ -49,6 +49,7 @@ impl CredentialScope {
 
 /// Parameters for the shared login/authentication flow.
 pub struct LoginParams {
+    pub quiet: bool,
     pub profile_name: String,
     pub tenant_id: String,
     pub app_id_uri: String,
@@ -135,14 +136,16 @@ async fn launch_browser_for_login(params: &LoginParams) -> Result<AzureLoginBrow
         params.tenant_id.get(..8).unwrap_or("????????")
     );
 
-    AzureLoginBrowser::new(
+    let mut browser = AzureLoginBrowser::new(
         params.headless,
         params.no_sandbox,
         remember_me_for_launch,
         &params.profile_name,
         params.allow_insecure_remote_chrome,
     )
-    .await
+    .await?;
+    browser.set_quiet(params.quiet);
+    Ok(browser)
 }
 
 /// Drive the browser through Azure AD login and return the SAML response.
@@ -231,7 +234,12 @@ pub async fn execute(args: &Args) -> Result<()> {
             write_credentials_json(&creds)?;
             return Ok(());
         }
-        print_credentials(&creds, login_args.output, login_args.show_secrets)?;
+        print_credentials(
+            &creds,
+            login_args.output,
+            login_args.show_secrets,
+            args.quiet,
+        )?;
         return Ok(());
     }
 
@@ -271,6 +279,7 @@ pub async fn execute(args: &Args) -> Result<()> {
     let role_was_supplied = role_arn.is_some();
 
     let params = LoginParams {
+        quiet: args.quiet,
         profile_name: args.profile.clone(),
         tenant_id: tenant_id.clone(),
         app_id_uri: app_id_uri.clone(),
@@ -302,6 +311,7 @@ pub async fn execute(args: &Args) -> Result<()> {
             &outcome.credentials,
             login_args.output,
             login_args.show_secrets,
+            args.quiet,
         )?;
     }
 
@@ -323,7 +333,11 @@ fn print_credentials(
     creds: &CredentialProcessOutput,
     format: OutputFormat,
     show_secrets: bool,
+    quiet: bool,
 ) -> Result<()> {
+    if quiet && !matches!(format, OutputFormat::Json) {
+        return Ok(());
+    }
     match format {
         OutputFormat::Json => {
             if show_secrets {
@@ -389,6 +403,66 @@ fn mask_secret(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn quiet_login_suppresses_human_output_but_keeps_json() {
+        use clap::Parser;
+        if let Ok(case) = std::env::var("AWZARS_QUIET_LOGIN_TEST") {
+            let directory = std::env::var("AWZARS_QUIET_LOGIN_DIRECTORY").unwrap();
+            config::set_config_dir_override(&directory).unwrap();
+            let mut config = Config::default();
+            config.set_profile(
+                "default",
+                crate::config::Profile {
+                    lock_ai_markers: Some(vec![]),
+                    ..Default::default()
+                },
+            );
+            config.save().unwrap();
+            CacheHandle::new("default")
+                .unwrap()
+                .store(&credentials("cached-output"))
+                .unwrap();
+            let mut arguments = vec!["awzars", "login"];
+            if case != "normal" {
+                arguments.push("--quiet");
+            }
+            match case.as_str() {
+                "json" => arguments.extend(["--output", "json"]),
+                "protocol" => arguments.push("--credential-process"),
+                _ => {}
+            }
+            execute(&Args::try_parse_from(arguments).unwrap())
+                .await
+                .unwrap();
+            return;
+        }
+        for case in ["normal", "quiet", "json", "protocol"] {
+            let directory = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cli::commands::login::tests::quiet_login_suppresses_human_output_but_keeps_json", "--nocapture"])
+                .env("AWZARS_QUIET_LOGIN_TEST", case)
+                .env("AWZARS_QUIET_LOGIN_DIRECTORY", directory.path())
+                .env_remove("AWZARS_AZURE_TENANT_ID")
+                .env_remove("AWZARS_AZURE_APP_ID_URI")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(stdout.contains("AWS Credentials:"), case == "normal");
+            assert_eq!(
+                stdout.contains("\"Version\""),
+                matches!(case, "json" | "protocol")
+            );
+            if case == "quiet" {
+                assert!(!stdout.contains("cached-output"));
+            }
+        }
+    }
 
     fn login_arguments() -> LoginArgs {
         LoginArgs {

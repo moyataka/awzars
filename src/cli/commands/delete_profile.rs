@@ -6,7 +6,7 @@
 use crate::config::cleanup::delete_awzars_profile;
 use crate::error::{AwzarsError, Result};
 
-pub fn run(profile: &str, yes: bool) -> Result<()> {
+pub fn run(profile: &str, yes: bool, quiet: bool) -> Result<()> {
     if !yes {
         let confirmed = dialoguer::Confirm::new()
             .with_prompt(format!(
@@ -17,20 +17,24 @@ pub fn run(profile: &str, yes: bool) -> Result<()> {
             .interact()
             .map_err(|e| AwzarsError::Dialog(e.to_string()))?;
         if !confirmed {
-            println!("Aborted.");
+            if !quiet {
+                println!("Aborted.");
+            }
             return Ok(());
         }
     }
 
     let report = delete_awzars_profile(profile)?;
 
-    println!("Deleted awzars profile '{}'.", profile);
-
-    for w in &report.warnings {
-        eprintln!("warning: {}", w);
+    if !quiet {
+        println!("Deleted awzars profile '{}'.", profile);
     }
 
-    if !report.orphaned_aws_profiles.is_empty() {
+    for w in &report.warnings {
+        tracing::warn!("{}", w);
+    }
+
+    if !quiet && !report.orphaned_aws_profiles.is_empty() {
         eprintln!(
             "\nThe following profiles in your configured AWS file still reference '{}':",
             profile

@@ -26,7 +26,7 @@ pub struct Args {
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Suppress output
+    /// Suppress informational output and logs below error (preserves JSON and prompts)
     #[arg(short, long, global = true)]
     pub quiet: bool,
 

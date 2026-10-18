@@ -44,6 +44,7 @@ pub async fn execute(args: &Args) -> Result<()> {
     let headless = has_remote || has_cookie_store || (remember_me && chromium_dir_exists);
     let mut browser =
         AzureLoginBrowser::new(headless, false, remember_me, &args.profile, false).await?;
+    browser.set_quiet(args.quiet);
 
     // Perform login and get SAML assertion, then close the browser before
     // parsing — avoids spurious CDP warnings while processing the assertion.
@@ -62,6 +63,9 @@ pub async fn execute(args: &Args) -> Result<()> {
 
     // Get roles
     let roles = assertion.roles();
+    if args.quiet && !matches!(output_format, OutputFormat::Json) {
+        return Ok(());
+    }
 
     // Output
     match output_format {

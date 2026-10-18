@@ -167,6 +167,7 @@ pub struct AzureLoginBrowser {
     headless: bool,
     remember_me: bool,
     is_remote: bool,
+    quiet: bool,
     profile: String,
     /// Ephemeral directory for non-remember-me sessions. Held so that it is
     /// cleaned up (deleted) when this struct is dropped after the browser exits.
@@ -221,15 +222,12 @@ impl AzureLoginBrowser {
     ) -> Result<Self> {
         let parsed = validate_ws_url(ws_url, allow_insecure)?;
 
-        // Prominent security warning
-        eprintln!(
-            "\x1b[1;31mWARNING\x1b[0m: Connecting to remote Chrome at {}",
+        tracing::warn!(
+            "Connecting to remote Chrome at {}. The authentication flow, including credentials, traverses this connection; only use a trusted Chrome instance.",
             redact_ws_url(&parsed)
         );
-        eprintln!("  The entire authentication flow (including credentials) will traverse this connection.");
-        eprintln!("  Only use this with Chrome instances you fully trust.");
         if parsed.scheme() == "ws" {
-            eprintln!("  Connection is \x1b[1;31mUNENCRYPTED\x1b[0m (ws://). Use wss:// for TLS.");
+            tracing::warn!("Connection is UNENCRYPTED (ws://). Use wss:// for TLS.");
         }
         // Separate cue for the network-crossing case. The general warning
         // above is the same regardless of host; an SSH-tunnelled loopback
@@ -237,7 +235,7 @@ impl AzureLoginBrowser {
         // operators routinely skim past warnings they've seen 100 times.
         // A dedicated line for non-loopback makes the WAN case visible.
         if !is_loopback_url(&parsed) {
-            eprintln!("  Host is non-loopback — credentials will traverse the network.");
+            tracing::warn!("Host is non-loopback — credentials will traverse the network.");
         }
 
         tracing::info!("Connecting to remote Chrome at {}", redact_ws_url(&parsed));
@@ -261,6 +259,7 @@ impl AzureLoginBrowser {
             headless,
             remember_me,
             is_remote: true,
+            quiet: false,
             profile: profile.to_string(),
             _ephemeral_dir: None,
         })
@@ -376,6 +375,7 @@ impl AzureLoginBrowser {
             headless,
             remember_me,
             is_remote: false,
+            quiet: false,
             profile: profile.to_string(),
             _ephemeral_dir: ephemeral_dir,
         })
@@ -436,6 +436,10 @@ impl AzureLoginBrowser {
     /// Whether this browser is connected to a remote Chrome instance.
     pub fn is_remote(&self) -> bool {
         self.is_remote
+    }
+
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
     }
 
     /// Extract all cookies from the current browser session and save them to
@@ -503,7 +507,7 @@ impl AzureLoginBrowser {
         crate::util::atomic_write(&path, &encrypted, 0o600)?;
 
         // Clean up old unencrypted cookie file if present. If removal fails,
-        // warn loudly on BOTH stderr and the tracing log — the plaintext cookie
+        // warn via the tracing log — the plaintext cookie
         // jar would otherwise persist on disk alongside the new encrypted
         // store, defeating the encryption. Subsequent calls into the cookie
         // store will fail-closed via `refuse_if_legacy_cookies_present` until
@@ -520,7 +524,6 @@ impl AzureLoginBrowser {
                     old_path.display(),
                     e
                 );
-                eprintln!("\x1b[1;31mWARNING\x1b[0m: {}", msg);
                 tracing::warn!("{}", msg);
             }
         }
@@ -597,8 +600,10 @@ impl AzureLoginBrowser {
 
     fn authentication_timeout(&self) -> Result<Duration> {
         if !self.headless {
-            eprintln!("Please complete the login in the browser window...");
-            eprintln!("Waiting for authentication...");
+            if !self.quiet {
+                eprintln!("Please complete the login in the browser window...");
+                eprintln!("Waiting for authentication...");
+            }
             Ok(Duration::from_secs(300))
         } else if self.remember_me || Self::has_cookie_store(&self.profile) {
             tracing::info!("Headless mode: attempting cookie-based re-authentication");

@@ -4,9 +4,11 @@
 use crate::auth::lock;
 use crate::error::Result;
 
-pub fn run(profile_name: &str) -> Result<()> {
+pub fn run(profile_name: &str, quiet: bool) -> Result<()> {
     lock::gc_stale_unlocks();
     lock::remove_unlock(profile_name)?;
-    println!("Profile '{}' locked for this session.", profile_name);
+    if !quiet {
+        println!("Profile '{}' locked for this session.", profile_name);
+    }
     Ok(())
 }
