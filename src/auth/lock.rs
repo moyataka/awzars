@@ -826,8 +826,8 @@ pub enum GateOutcome {
 ///
 /// `allow_inline_prompt = true` permits an inline TTY prompt (password for a
 /// locked profile when no AI is detected; y/N consent for an unlocked
-/// profile under AI). `false` (used by `credential-process`) hard-fails with
-/// an actionable error message.
+/// profile under AI). Password input uses the controlling TTY; AI consent
+/// requires terminal stdin and stderr. Otherwise an actionable error is returned.
 ///
 /// `persist_consent` only affects the unlocked-profile + AI consent path.
 /// `false` (default for `login`/`list-roles`) means the y/N prompt fires on
@@ -906,14 +906,9 @@ pub fn enforce(
         return Ok(GateOutcome::AlreadyUnlocked);
     }
 
-    // Gate on `stdin().is_terminal()` rather than `tty_available()` here:
-    // under Claude Code's Bash tool the subprocess inherits the user's
-    // controlling TTY (so `/dev/tty` is reachable) but stdin is captured,
-    // so a `/dev/tty` read_line() blocks forever waiting for keystrokes
-    // that Claude Code never forwards. `stdin().is_terminal()` is false in
-    // that case (and under AWS CLI's credential_process pipe), letting us
-    // fall through to the actionable AiContextBlocked error.
-    if allow_inline_prompt && std::io::stdin().is_terminal() {
+    // AI tools may capture stdin; AWS CLI can inherit terminal stdin while
+    // piping stderr. Dialoguer requires stderr to be a terminal as well.
+    if allow_inline_prompt && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
         let marker = ai_marker.expect("checked above");
         let prompt = if persist_consent {
             format!(
@@ -957,6 +952,47 @@ pub fn enforce(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[cfg(unix)]
+    #[test]
+    fn ai_consent_with_terminal_stdin_and_piped_stderr_is_actionable() {
+        const CHILD_MARKER: &str = "AWZARS_CONSENT_PIPE_TEST";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            assert!(std::io::stdin().is_terminal());
+            assert!(!std::io::stderr().is_terminal());
+            let profile = Profile {
+                lock_ai_markers: Some(vec![CHILD_MARKER.into()]),
+                ..Default::default()
+            };
+            let result = enforce(
+                &format!("consent_{}", uuid::Uuid::new_v4()),
+                &profile,
+                true,
+                false,
+            );
+            assert!(matches!(result, Err(AwzarsError::AiContextBlocked { .. })));
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let terminal = nix::pty::openpty(None, None).unwrap();
+        let input = std::fs::File::from(terminal.slave);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "auth::lock::tests::ai_consent_with_terminal_stdin_and_piped_stderr_is_actionable",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env("XDG_RUNTIME_DIR", directory.path())
+            .stdin(input)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     /// Serialize tests that mutate process-global env vars. `cargo test`
     /// runs each test in a thread by default; without this, two tests both

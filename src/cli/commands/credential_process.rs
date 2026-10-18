@@ -36,9 +36,8 @@ pub async fn execute(args: &Args) -> Result<()> {
     // session and subsequent calls in the same TTY skip the prompt. AI markers
     // still refuse the inline prompt (security: never read a password under AI
     // gaze; user must run `awzars unlock --allow-ai` explicitly).
-    // `persist_consent` stays false: the AI-consent inline path is unreachable
-    // here because credential-process never sees an unlocked profile that needs
-    // consent without already having a token.
+    // AI consent requires terminal stderr too; AWS CLI pipes it, so callers
+    // without consent receive the explicit `unlock --allow-ai` guidance.
     crate::auth::lock::enforce(&args.profile, profile, true, false)?;
 
     // Check only after taking the process lock so waiters see the credentials
