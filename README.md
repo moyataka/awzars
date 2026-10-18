@@ -347,6 +347,12 @@ Key bindings: `↑/↓/j/k` navigate, `a` add, `e`/`Enter` edit, `d` delete,
 `Tab`/`Shift+Tab` switch tabs, `Ctrl+S` save, `Ctrl+D` clear focused field,
 `Esc` cancel, `q` quit.
 
+Adding or renaming to an existing name is rejected. Existing awzars profile
+names are read-only because browser sessions, password locks, and AWS links
+belong to that name. To change one, clone the profile under a new name, set
+its password lock if needed, update the AWS links, and then delete the old
+profile to clean up its saved state.
+
 Assume-role profiles (`source_profile` + `role_arn`) get a dedicated form
 that exposes `role_session_name` alongside the source-profile autocomplete,
 so the entry written into `~/.aws/config` is complete without a follow-up

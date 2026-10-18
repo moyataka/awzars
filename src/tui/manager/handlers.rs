@@ -14,6 +14,10 @@ use crate::tui::form::{AwsProfileForm, ProfileForm, AWS_IDX_SOURCE_PROFILE};
 use crate::tui::form_ops::{key_to_field_op, move_index, FieldOp};
 use crossterm::event::{KeyCode, KeyModifiers};
 
+#[cfg(test)]
+#[path = "handlers_tests.rs"]
+mod tests;
+
 impl ConfigManager {
     // ---- Browse mode ----
 
@@ -176,6 +180,15 @@ impl ConfigManager {
 
         match form.to_profile() {
             Ok((name, mut profile)) => {
+                if form.original_name.as_deref() != Some(name.as_str())
+                    && self.config.profiles.contains_key(&name)
+                {
+                    self.status = Some((
+                        StatusLevel::Error,
+                        format!("Profile '{}' already exists", name),
+                    ));
+                    return;
+                }
                 // Snapshot the prior profile (under the original name on edit,
                 // or the new name on add) for two purposes:
                 //   * preserve password-lock state across saves (the form
@@ -186,7 +199,6 @@ impl ConfigManager {
                     .original_name
                     .as_deref()
                     .and_then(|n| self.config.profiles.get(n))
-                    .or_else(|| self.config.profiles.get(&name))
                     .cloned();
 
                 if let Some(ref prev) = prev_profile {
@@ -200,33 +212,19 @@ impl ConfigManager {
                     .map(|prev| crate::config::cleanup::credential_identity_changed(prev, &profile))
                     .unwrap_or(false);
 
-                let renamed_from = form
-                    .original_name
-                    .as_deref()
-                    .filter(|orig| *orig != name.as_str())
-                    .map(|s| s.to_string());
-
-                if let Some(ref original) = renamed_from {
-                    self.config.remove_profile(original);
-                }
-                self.config.set_profile(&name, profile);
-                if let Err(e) = self.config.save() {
+                let mut updated_config = self.config.clone();
+                updated_config.set_profile(&name, profile);
+                if let Err(e) = updated_config.save() {
                     self.status = Some((StatusLevel::Error, format!("Save failed: {}", e)));
                     return;
                 }
+                self.config = updated_config;
 
                 // Wipe stale cached/keyring STS credentials so the next
                 // `credential-process` call re-authenticates against the
                 // current profile rather than returning a session minted for
                 // the previous role / tenant / app id.
                 let mut warnings: Vec<String> = Vec::new();
-                if let Some(ref orig) = renamed_from {
-                    warnings.extend(
-                        crate::config::cleanup::invalidate_cached_credentials(orig)
-                            .into_iter()
-                            .map(|w| format!("{}: {}", orig, w)),
-                    );
-                }
                 if identity_changed {
                     warnings.extend(
                         crate::config::cleanup::invalidate_cached_credentials(&name)
@@ -343,23 +341,35 @@ impl ConfigManager {
 
         match form.to_entry() {
             Ok(entry) => {
+                if form.original_name.as_deref() != Some(entry.name.as_str())
+                    && self
+                        .aws_profiles
+                        .iter()
+                        .any(|profile| profile.name == entry.name)
+                {
+                    self.status = Some((
+                        StatusLevel::Error,
+                        format!("AWS profile '{}' already exists", entry.name),
+                    ));
+                    return;
+                }
                 let focus_name = entry.name.clone();
+                let mut updated_profiles = self.aws_profiles.clone();
                 // Check if rename
                 if let Some(ref original) = form.original_name {
                     if original != &entry.name {
-                        self.aws_profiles.retain(|p| p.name != *original);
+                        updated_profiles.retain(|p| p.name != *original);
                     }
                 }
                 // Update or insert
-                if let Some(existing) = self.aws_profiles.iter_mut().find(|p| p.name == entry.name)
-                {
+                if let Some(existing) = updated_profiles.iter_mut().find(|p| p.name == entry.name) {
                     *existing = entry;
                 } else {
-                    self.aws_profiles.push(entry);
+                    updated_profiles.push(entry);
                 }
 
                 if let Err(e) =
-                    save_aws_config(&self.aws_profiles, self.config.aws_config_path.as_deref())
+                    save_aws_config(&updated_profiles, self.config.aws_config_path.as_deref())
                 {
                     self.status = Some((StatusLevel::Error, format!("Save failed: {}", e)));
                     return;

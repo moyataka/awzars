@@ -74,7 +74,7 @@ pub struct ProfileForm {
     pub focused: usize,
     /// Which toggle is focused (None = text field focused)
     pub toggle_focused: Option<usize>,
-    /// Original profile name being edited (for rename detection)
+    /// Original profile name; existing awzars profile names are immutable.
     pub original_name: Option<String>,
     /// Stored original values for cancel
     pub original_values: Vec<String>,
@@ -99,7 +99,7 @@ impl ProfileForm {
     /// Create a form pre-populated from an existing profile
     pub fn from_profile(name: &str, profile: &Profile) -> Self {
         let fields = vec![
-            FormField::new("Profile Name", name.to_string(), false),
+            FormField::new("Name (read-only)", name.to_string(), false),
             FormField::new("Tenant ID", profile.azure.tenant_id.clone(), false),
             FormField::new("App ID URI", profile.azure.app_id_uri.clone(), false),
             FormField::new(
@@ -125,7 +125,7 @@ impl ProfileForm {
         Self {
             fields,
             toggles,
-            focused: 0,
+            focused: IDX_TENANT,
             toggle_focused: None,
             original_name: Some(name.to_string()),
             original_values,
@@ -139,9 +139,11 @@ impl ProfileForm {
     /// creating a new profile (empty name, no original_name).
     pub fn clone_from(source_name: &str, profile: &Profile) -> Self {
         let mut form = Self::from_profile(source_name, profile);
+        form.fields[IDX_NAME].label = "Profile Name";
         form.fields[IDX_NAME].value.clear();
         form.fields[IDX_NAME].cursor_pos = 0;
         form.original_name = None;
+        form.focused = IDX_NAME;
         form.original_values[IDX_NAME] = String::new();
         form
     }
@@ -269,7 +271,9 @@ impl ProfileForm {
 
     /// Get the currently focused field mutably
     pub fn focused_field_mut(&mut self) -> Option<&mut FormField> {
-        if self.toggle_focused.is_some() {
+        if self.toggle_focused.is_some()
+            || (self.focused == IDX_NAME && self.original_name.is_some())
+        {
             None
         } else {
             self.fields.get_mut(self.focused)
@@ -309,6 +313,13 @@ impl ProfileForm {
         // Profile name
         if let Err(e) = parse_profile_name(&self.fields[IDX_NAME].value) {
             errors.push(format!("Profile Name: {}", e));
+        }
+        if self
+            .original_name
+            .as_ref()
+            .is_some_and(|name| name != &self.fields[IDX_NAME].value)
+        {
+            errors.push("Existing awzars profiles cannot be renamed; clone to a new name and update AWS links before deleting the old profile".into());
         }
 
         // Tenant ID
