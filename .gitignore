@@ -14,3 +14,7 @@
 
 # Stray binary copy at repo root (not the cargo build under target/)
 /awzars
+
+# Local working notes (not for commit)
+TASK.md
+REPORT.md

@@ -88,11 +88,13 @@ async fn run(args: Args) -> awzars::error::Result<()> {
             allow_ai,
             ttl_hours,
             allow_long_ttl,
+            no_expire,
         } => awzars::cli::commands::unlock::run(
             &args.profile,
             *allow_ai,
             *ttl_hours,
             *allow_long_ttl,
+            *no_expire,
         ),
         Command::Lock => awzars::cli::commands::lock::run(&args.profile),
     }

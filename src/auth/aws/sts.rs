@@ -2,7 +2,9 @@
 
 use crate::credential_process::protocol::CredentialProcessOutput;
 use crate::error::{AwzarsError, Result};
+use aws_config::meta::region::RegionProviderChain;
 use aws_config::BehaviorVersion;
+use aws_sdk_sts::config::Region;
 
 /// Filter an AWS error code string down to a printable, terminal-safe subset
 /// before surfacing it to the user. The SDK echoes whatever the service
@@ -24,15 +26,45 @@ fn sanitize_aws_error_code(code: &str) -> String {
     }
 }
 
+/// Normalize a user-supplied region: trim surrounding whitespace and treat a
+/// blank value as "unset" so a hand-edited `region = ""` in
+/// `~/.awzars/config.toml` never becomes an empty, invalid region.
+fn sanitize_region(region: Option<String>) -> Option<Region> {
+    region
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .map(Region::new)
+}
+
+/// Region provider for the STS endpoint, in precedence order:
+///
+/// 1. the awzars profile's `region` (so a region set only in
+///    `~/.awzars/config.toml` is honoured — it was previously ignored),
+/// 2. the standard AWS default chain (`AWS_REGION` / `AWS_DEFAULT_REGION`,
+///    `~/.aws/config`, IMDS),
+/// 3. a `us-east-1` fallback so `AssumeRoleWithSAML` never fails purely for
+///    lack of a configured region anywhere.
+fn build_region_provider(profile_region: Option<String>) -> RegionProviderChain {
+    RegionProviderChain::first_try(sanitize_region(profile_region))
+        .or_default_provider()
+        .or_else(Region::new("us-east-1"))
+}
+
 /// Exchange a SAML assertion for AWS credentials
 pub async fn exchange_saml_for_credentials(
     saml_assertion: &str,
     role_arn: &str,
     principal_arn: &str,
     session_duration: i32,
+    profile_region: Option<String>,
 ) -> Result<CredentialProcessOutput> {
-    // Load AWS config (uses environment variables and ~/.aws/config)
-    let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+    // Region honours the awzars profile first, then the AWS default chain,
+    // then a us-east-1 fallback (see `build_region_provider`). Previously this
+    // used `load_defaults`, which ignored the awzars profile region entirely.
+    let config = aws_config::defaults(BehaviorVersion::latest())
+        .region(build_region_provider(profile_region))
+        .load()
+        .await;
     let sts_client = aws_sdk_sts::Client::new(&config);
 
     // Call AssumeRoleWithSAML
@@ -122,5 +154,25 @@ mod tests {
     fn caps_length_to_64_chars() {
         let huge = "A".repeat(1000);
         assert_eq!(sanitize_aws_error_code(&huge).len(), 64);
+    }
+
+    #[test]
+    fn sanitize_region_trims_and_drops_blank() {
+        use super::sanitize_region;
+        use aws_sdk_sts::config::Region;
+        assert_eq!(
+            sanitize_region(Some("eu-west-1".into())),
+            Some(Region::new("eu-west-1"))
+        );
+        // Surrounding whitespace from a hand-edited config is trimmed.
+        assert_eq!(
+            sanitize_region(Some("  us-east-2 ".into())),
+            Some(Region::new("us-east-2"))
+        );
+        // Blank / whitespace-only values are treated as unset, not an empty
+        // (invalid) region.
+        assert_eq!(sanitize_region(Some(String::new())), None);
+        assert_eq!(sanitize_region(Some("   ".into())), None);
+        assert_eq!(sanitize_region(None), None);
     }
 }
