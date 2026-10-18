@@ -283,6 +283,12 @@ Opens a browser, performs Azure AD login (MFA supported), extracts the SAML
 assertion, calls `AssumeRoleWithSAML`, and caches the resulting AWS
 credentials in the OS keyring + in-memory cache.
 
+Cached credentials refresh when 15 minutes or less remain, matching the AWS
+SDK's advisory refresh window. Session duration defaults to the profile's
+setting (one hour if unset); `--session-duration` overrides it and forces a
+fresh login. Use a duration above 900 seconds for cache reuse: a 15-minute
+session is already inside the refresh window and refreshes on every invocation.
+
 `AWZARS_AZURE_TENANT_ID` and `AWZARS_AZURE_APP_ID_URI` supply defaults for
 `--azure-tenant` and `--azure-app` in login and configure. Explicit flags take
 precedence. The common Azure SDK variables `AZURE_TENANT_ID` and

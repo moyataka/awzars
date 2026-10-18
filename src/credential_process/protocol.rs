@@ -11,6 +11,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::Result;
 
+// Match botocore's advisory refresh window so a refresh does not return the
+// same credentials that caused the SDK to call us in the first place.
+const REFRESH_BUFFER: chrono::Duration = chrono::Duration::minutes(15);
+
 // SECURITY: `CredentialProcessOutput` and `Credentials` hold AWS secrets in
 // plain `String` fields because the credential_process protocol mandates
 // `Serialize`/`Deserialize` to/from JSON, and `zeroize::Zeroizing<String>` is
@@ -73,13 +77,12 @@ impl CredentialProcessOutput {
         self
     }
 
-    /// Check if credentials are still valid (with 5 minute buffer)
+    /// Whether cached credentials have more than 15 minutes remaining.
     pub fn is_valid(&self) -> bool {
         if let Some(ref expiration) = self.expiration {
             if let Ok(exp_time) = DateTime::parse_from_rfc3339(expiration) {
                 let now = Utc::now();
-                let buffer = chrono::Duration::minutes(5);
-                return now + buffer < exp_time.with_timezone(&Utc);
+                return now + REFRESH_BUFFER < exp_time.with_timezone(&Utc);
             }
         }
         false
@@ -177,12 +180,11 @@ impl Drop for Credentials {
 }
 
 impl Credentials {
-    /// Check if credentials are still valid (with 5 minute buffer)
+    /// Whether cached credentials have more than 15 minutes remaining.
     pub fn is_valid(&self) -> bool {
         if let Some(exp_time) = self.expiration {
             let now = Utc::now();
-            let buffer = chrono::Duration::minutes(5);
-            return now + buffer < exp_time;
+            return now + REFRESH_BUFFER < exp_time;
         }
         false
     }
@@ -234,6 +236,38 @@ impl From<CredentialProcessOutput> for Credentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_and_keyring_refresh_before_sdk_refresh_windows() {
+        for (seconds_remaining, expected_fresh) in [
+            (3600, true),
+            (960, true),
+            (900, false),
+            (840, false),
+            (600, false),
+            (300, false),
+            (0, false),
+            (-60, false),
+        ] {
+            let expiration = Utc::now() + chrono::Duration::seconds(seconds_remaining);
+            let output = CredentialProcessOutput::new("test-key", "test-secret")
+                .with_expiration(expiration.to_rfc3339());
+            let stored = Credentials::from(output.clone());
+            assert_eq!(output.is_valid(), expected_fresh, "{seconds_remaining}");
+            assert_eq!(stored.is_valid(), expected_fresh, "{seconds_remaining}");
+            let profile = format!("freshness_{}", uuid::Uuid::new_v4());
+            let cache = crate::storage::cache::CacheHandle::new(&profile).unwrap();
+            cache.store(&output).unwrap();
+            assert_eq!(
+                cache.get_valid_credentials().unwrap().is_some(),
+                expected_fresh
+            );
+            cache.clear().unwrap();
+        }
+        assert!(!CredentialProcessOutput::new("key", "secret")
+            .with_expiration("invalid")
+            .is_valid());
+    }
 
     #[test]
     fn test_credential_output_json() {
