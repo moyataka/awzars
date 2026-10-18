@@ -283,6 +283,11 @@ Opens a browser, performs Azure AD login (MFA supported), extracts the SAML
 assertion, calls `AssumeRoleWithSAML`, and caches the resulting AWS
 credentials in the OS keyring + in-memory cache.
 
+`AWZARS_AZURE_TENANT_ID` and `AWZARS_AZURE_APP_ID_URI` supply defaults for
+`--azure-tenant` and `--azure-app` in login and configure. Explicit flags take
+precedence. The common Azure SDK variables `AZURE_TENANT_ID` and
+`AZURE_APP_ID_URI` are ignored.
+
 Login overrides (`--role-arn`, `--azure-tenant`, or `--azure-app`) always
 authenticate afresh. Their credentials are returned for that invocation only;
 the profile's cached credentials and saved role remain unchanged.
