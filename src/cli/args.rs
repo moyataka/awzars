@@ -54,9 +54,9 @@ pub enum Command {
         #[arg(long, value_parser = parse_role_arn)]
         role_arn: Option<String>,
 
-        /// Session duration in seconds (900..=43200)
-        #[arg(long, default_value = "3600", value_parser = parse_session_duration)]
-        session_duration: i32,
+        /// Session duration in seconds (900..=43200; defaults to profile setting)
+        #[arg(long, value_parser = parse_session_duration)]
+        session_duration: Option<i32>,
 
         /// Run browser in headless mode
         #[arg(long)]
@@ -225,7 +225,7 @@ pub struct LoginArgs {
     pub azure_tenant: Option<String>,
     pub azure_app: Option<String>,
     pub role_arn: Option<String>,
-    pub session_duration: i32,
+    pub session_duration: Option<i32>,
     pub headless: bool,
     pub no_sandbox: bool,
     pub force_refresh: bool,
@@ -238,6 +238,14 @@ pub struct LoginArgs {
 }
 
 impl LoginArgs {
+    pub fn resolved_session_duration(&self, azure: &crate::config::AzureConfig) -> i32 {
+        self.session_duration.unwrap_or(azure.session_duration)
+    }
+
+    pub fn refresh_requested(&self) -> bool {
+        self.force_refresh || self.session_duration.is_some()
+    }
+
     pub fn from_command(cmd: &Command) -> Option<Self> {
         match cmd {
             Command::Login {
@@ -409,6 +417,24 @@ pub fn parse_app_id_uri(s: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_duration_uses_cli_then_profile_then_default() {
+        let mut azure = crate::config::AzureConfig::default();
+        let arguments = Args::try_parse_from(["awzars", "login"]).unwrap();
+        let login = LoginArgs::from_command(&arguments.command).unwrap();
+        assert_eq!(login.session_duration, None);
+        assert_eq!(login.resolved_session_duration(&azure), 3600);
+        assert!(!login.refresh_requested());
+        azure.session_duration = 43200;
+        assert_eq!(login.resolved_session_duration(&azure), 43200);
+
+        let arguments =
+            Args::try_parse_from(["awzars", "login", "--session-duration", "7200"]).unwrap();
+        let login = LoginArgs::from_command(&arguments.command).unwrap();
+        assert_eq!(login.resolved_session_duration(&azure), 7200);
+        assert!(login.refresh_requested());
+    }
 
     #[test]
     fn test_parse_session_duration_valid() {

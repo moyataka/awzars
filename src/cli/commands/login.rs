@@ -225,7 +225,7 @@ pub async fn execute(args: &Args) -> Result<()> {
     crate::auth::lock::enforce(&args.profile, profile, true, login_args.session_remember)?;
 
     let credential_scope = CredentialScope::for_login(&login_args);
-    if let Some(creds) = credential_scope.load(&args.profile, login_args.force_refresh)? {
+    if let Some(creds) = credential_scope.load(&args.profile, login_args.refresh_requested())? {
         if login_args.credential_process {
             write_credentials_json(&creds)?;
             return Ok(());
@@ -275,7 +275,7 @@ pub async fn execute(args: &Args) -> Result<()> {
         app_id_uri: app_id_uri.clone(),
         role_arn,
         region: profile.region.clone(),
-        session_duration: login_args.session_duration,
+        session_duration: login_args.resolved_session_duration(&profile.azure),
         headless: login_args.headless,
         no_sandbox: login_args.no_sandbox,
         remember_me,
@@ -394,7 +394,7 @@ mod tests {
             azure_tenant: None,
             azure_app: None,
             role_arn: None,
-            session_duration: 3600,
+            session_duration: None,
             headless: false,
             no_sandbox: false,
             force_refresh: false,
