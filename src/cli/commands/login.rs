@@ -224,6 +224,8 @@ pub async fn execute(args: &Args) -> Result<()> {
     // ask every invocation.
     crate::auth::lock::enforce(&args.profile, profile, true, login_args.session_remember)?;
 
+    let _refresh_guard =
+        crate::auth::credentials::CredentialRefreshGuard::acquire(&args.profile).await?;
     let credential_scope = CredentialScope::for_login(&login_args);
     if let Some(creds) = credential_scope.load(&args.profile, login_args.refresh_requested())? {
         if login_args.credential_process {

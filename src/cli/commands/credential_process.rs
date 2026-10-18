@@ -41,7 +41,10 @@ pub async fn execute(args: &Args) -> Result<()> {
     // consent without already having a token.
     crate::auth::lock::enforce(&args.profile, profile, true, false)?;
 
-    // Cache + keyring lookup before falling through to browser login.
+    // Check only after taking the process lock so waiters see the credentials
+    // persisted by the previous holder before considering another browser.
+    let _refresh_guard =
+        crate::auth::credentials::CredentialRefreshGuard::acquire(&args.profile).await?;
     if let Some(creds) = crate::auth::credentials::try_load_credentials(&args.profile, refresh)? {
         write_credentials_json(&creds)?;
         return Ok(());

@@ -6,80 +6,70 @@
 //! intact.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// Append `.tmp` to a path. Used so the temp file is in the same directory
-/// as the target — `fs::rename` is only atomic on the same filesystem.
-fn tmp_for(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_owned();
-    s.push(".tmp");
-    PathBuf::from(s)
-}
-
-/// Atomically write `contents` to `path`, applying `unix_mode` on Unix.
-///
-/// On Unix the temp file is created with `O_CREAT | O_EXCL | O_NOFOLLOW`
-/// after first unlinking any stale `<path>.tmp`. The combination defeats a
-/// same-UID adversary who tries to plant the temp path as a symlink, a
-/// pre-existing file with looser mode bits, or a hardlink: the create
-/// refuses any of those, and `fchmod` on the open fd applies `unix_mode`
-/// over whatever the umask masked off at create time.
-///
-/// If the rename fails, the temp file is left in place; the next call to
-/// `atomic_write` for the same target will unlink and recreate it before
-/// renaming again, so there is no leak across normal recovery.
+/// Write a unique sibling file, sync it, then atomically replace the target.
+/// Concurrent writers never share a temporary path. Failed writes clean up
+/// their own temporary file; the previous target remains intact.
 pub fn atomic_write(path: &Path, contents: &[u8], unix_mode: u32) -> std::io::Result<()> {
-    let tmp = tmp_for(path);
-
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".awzars-")
+        .tempfile_in(parent)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        // Drop any stale temp file. A previous run may have crashed mid-write,
-        // or — more interestingly — a same-UID adversary may have pre-created
-        // <path>.tmp as a symlink to a file outside our control. Unlinking
-        // first guarantees the create below makes a fresh inode of our own.
-        // ENOENT is the expected case; other errors are reported by the
-        // create that follows.
-        match std::fs::remove_file(&tmp) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => { /* fall through; OpenOptions will surface a real error */ }
-        }
-
-        let mut file = std::fs::OpenOptions::new()
-            // O_CREAT | O_EXCL: refuse to open if the temp file reappeared
-            // between the unlink and now (race with another caller, or an
-            // adversarial create).
-            .create_new(true)
-            .write(true)
-            .mode(unix_mode)
-            // O_NOFOLLOW: belt-and-braces — O_EXCL alone already refuses
-            // existing symlinks, but keeping NOFOLLOW makes the intent
-            // explicit and survives any future relaxation of create_new.
-            .custom_flags(nix::libc::O_NOFOLLOW)
-            .open(&tmp)?;
-
-        // fchmod the open fd. The mode argument to OpenOptions is masked by
-        // the process umask at create time, so a 0o022 umask would leave a
-        // 0o600-requested file at 0o600 anyway — but a more permissive umask
-        // (or a custom create-mode handler) would silently widen the mode.
-        // Operating on the fd cannot be redirected by a symlink race.
-        file.set_permissions(std::fs::Permissions::from_mode(unix_mode))?;
-        file.write_all(contents)?;
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(unix_mode))?;
     }
     #[cfg(not(unix))]
-    {
-        let _ = unix_mode;
-        std::fs::write(&tmp, contents)?;
-    }
-
-    std::fs::rename(&tmp, path)
+    let _ = unix_mode;
+    temporary.write_all(contents)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_writes_produce_one_complete_file_without_leftovers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("target");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for byte in 0..8 {
+                let path = &path;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let contents = vec![byte; 128 * 1024];
+                    barrier.wait();
+                    atomic_write(path, &contents, 0o600).unwrap();
+                });
+            }
+        });
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents.len(), 128 * 1024);
+        assert!(contents.iter().all(|byte| *byte == contents[0]));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_rename_cleans_up_its_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("directory");
+        std::fs::create_dir(&target).unwrap();
+        assert!(atomic_write(&target, b"contents", 0o600).is_err());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn writes_contents_and_removes_tmp() {
@@ -89,7 +79,7 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).unwrap(), b"hello");
         assert!(
-            !tmp_for(&path).exists(),
+            !dir.path().join("target.tmp").exists(),
             "temp file should be gone after rename"
         );
     }
@@ -119,15 +109,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn refuses_temp_file_that_is_a_symlink() {
-        // Plant <path>.tmp as a symlink to a sentinel file. atomic_write
-        // must unlink the symlink and create a fresh file rather than
-        // writing through it.
+        // A planted legacy temporary path must never be used by a new write.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("target");
         let sentinel = dir.path().join("sentinel");
         std::fs::write(&sentinel, b"original").unwrap();
 
-        std::os::unix::fs::symlink(&sentinel, tmp_for(&path)).unwrap();
+        std::os::unix::fs::symlink(&sentinel, dir.path().join("target.tmp")).unwrap();
 
         atomic_write(&path, b"new", 0o600).unwrap();
 
@@ -143,10 +131,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("target");
-        let tmp = tmp_for(&path);
+        let tmp = dir.path().join("target.tmp");
 
-        // Pre-plant a stale temp file with a loose mode. atomic_write must
-        // unlink it and create a fresh one whose mode matches the request.
+        // A stale temporary file must not affect the new file permissions.
         std::fs::write(&tmp, b"stale").unwrap();
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
 

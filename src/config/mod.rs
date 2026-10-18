@@ -78,7 +78,11 @@ pub fn ensure_config_dir() -> Result<()> {
         if let Some(parent) = dir.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::create_dir(&dir)?;
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     crate::util::enforce_perms_no_symlink(&dir, 0o700)?;
     Ok(())
