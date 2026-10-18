@@ -346,11 +346,14 @@ impl AzureLoginBrowser {
                             v
                         ))
                         .unwrap_or_default();
+                    let data_directory = config::chromium_data_dir(profile)
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|_| "the configured Chromium data directory".into());
                     AwzarsError::Browser(format!(
                         "Permission denied launching Chrome for profile '{}'.{} \
-                         If you previously ran awzars with sudo, fix with: \
-                         sudo chown -R \"$USER\" ~/.awzars/chromium/{}",
-                        profile, chrome_hint, profile
+                         If you previously ran awzars with sudo, check ownership \
+                         and permissions of {}.",
+                        profile, chrome_hint, data_directory
                     ))
                 } else {
                     AwzarsError::Browser(format!(

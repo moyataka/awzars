@@ -318,7 +318,7 @@ pub async fn execute(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Save `role_arn` into the named profile in `~/.awzars/config.toml`.
+/// Save `role_arn` into the named profile in the configured `config.toml`.
 ///
 /// Best-effort: callers log and continue on failure rather than fail the
 /// whole login (credentials are already cached at this point).

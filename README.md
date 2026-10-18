@@ -41,7 +41,7 @@ remains the mature, widely-deployed option.
 | Memory zeroing | Best-effort GC | `zeroize` (Drop-based) on every secret |
 | Cookie persistence | n/a (or plaintext) | ChaCha20-Poly1305 with rotating keyring-backed keys |
 | AI-agent fence | n/a | Opt-in per-profile password lock + `CLAUDECODE` / `AI_AGENT` consent gate |
-| TUI config manager | n/a | `awzars tui` (full CRUD on `~/.awzars/config.toml` and `~/.aws/config`) |
+| TUI config manager | n/a | `awzars tui` (full CRUD on `<config-dir>/config.toml` and `~/.aws/config`) |
 | Headless re-auth | Manual flag plumbing | Automatic in `credential-process` via saved cookies |
 | Remote Chrome | Limited | First-class (`CHROME_REMOTE_URL`, `wss://` enforced) |
 
@@ -271,7 +271,7 @@ aws s3 ls --profile work                  # 3. AWS CLI now refreshes credentials
 awzars configure
 ```
 
-Prompts for Azure AD tenant ID, app ID URI, optional default role ARN, and session duration; writes `~/.awzars/config.toml` (mode `0o600`).
+Prompts for Azure AD tenant ID, app ID URI, optional default role ARN, and session duration; writes `<config-dir>/config.toml` (mode `0o600` on Unix). See [Configuration](#configuration) for your platform's directory.
 
 ### 2. Login
 
@@ -339,7 +339,7 @@ awzars tui
 
 Full-screen terminal UI (ratatui) with two tabs:
 
-- **awzars profiles** (`~/.awzars/config.toml`) — full CRUD
+- **awzars profiles** (`<config-dir>/config.toml`) — full CRUD
 - **AWS config** (`~/.aws/config`) — full CRUD for awzars-linked profiles,
   edit-only for others (SSO / static / assume-role)
 
@@ -393,7 +393,7 @@ These work on every subcommand:
 | `--profile <name>` | Pick an awzars profile (default: `default`) |
 | `-v` / `-vv` / `-vvv` | Tracing verbosity: `info` / `debug` / `trace` |
 | `--quiet` | Suppresses status text, text/table results, and logs below error; overrides `-v` and `RUST_LOG`. JSON output, required prompts, and the requested TUI remain available. |
-| `--config-dir <path>` | Override `~/.awzars/`; equivalent to env `AWZARS_CONFIG_DIR` |
+| `--config-dir <path>` | Use an absolute configuration directory; takes precedence over `AWZARS_CONFIG_DIR` |
 | `--output text\|json\|table` | Output shape for `login` and `list-roles` |
 
 ### Exit codes
@@ -443,10 +443,33 @@ Linux, etc.).
 
 ## Configuration
 
-`~/.awzars/config.toml` (mode `0o600`, dir `0o700`):
+`<config-dir>` means the resolved awzars configuration directory:
+
+| Platform | Default configuration directory |
+|---|---|
+| Linux | `$XDG_CONFIG_HOME/awzars` when the variable is an absolute path; otherwise `~/.config/awzars` |
+| macOS | `~/Library/Application Support/com.awzars.awzars` |
+| Windows | `%APPDATA%\awzars\awzars\config` |
+
+These paths come from `ProjectDirs::from("com", "awzars", "awzars")`.
+`--config-dir <absolute-path>` takes precedence over `AWZARS_CONFIG_DIR`,
+which takes precedence over the platform default. `~/.awzars` is only used
+if selected explicitly through an override. The AWS configuration file is
+separate: `aws_config_path` overrides its usual `~/.aws/config` location.
+
+```text
+<config-dir>/                     awzars settings and browser state
+|-- config.toml                   profiles and preferences
+|-- refresh-<profile>.lock        coordinates credential refreshes
+`-- chromium/<profile>/          remembered browser data
+    `-- cookies.enc              encrypted session cookies
+```
+
+The directory has mode `0o700` and `config.toml` has mode `0o600` on Unix.
+Example `<config-dir>/config.toml`:
 
 ```toml
-aws_config_path = "~/.aws/config"   # optional override for the TUI
+aws_config_path = "~/.aws/config"   # optional override for AWS profile editing and orphan checks
 
 [profiles.default.azure]
 tenant_id = "00000000-0000-0000-0000-000000000000"
@@ -454,14 +477,14 @@ app_id_uri = "https://signin.aws.amazon.com/saml"
 
 [profiles.work]
 role_arn = "arn:aws:iam::123456789012:role/MyRole"
-session_duration = 3600
 [profiles.work.azure]
 tenant_id = "11111111-1111-1111-1111-111111111111"
 app_id_uri = "https://signin.aws.amazon.com/saml"
+session_duration = 3600
 ```
 
-Override the config dir entirely with `--config-dir <path>` or
-`AWZARS_CONFIG_DIR=<path>`.
+Use the same override on each invocation, including the command saved in
+AWS `credential_process`, when using a custom awzars configuration directory.
 
 ## Troubleshooting
 
