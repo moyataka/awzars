@@ -191,11 +191,13 @@ impl SamlAssertion {
         })
     }
 
-    /// Get available roles
+    /// Get available roles in stable account, role-path, and ARN order.
     pub fn roles(&self) -> Vec<(String, String)> {
-        self.roles
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+        let mut roles: Vec<_> = self.roles.iter().collect();
+        roles.sort_unstable_by(|(left, _), (right, _)| role_order(left).cmp(&role_order(right)));
+        roles
+            .into_iter()
+            .map(|(role, principal)| (role.clone(), principal.clone()))
             .collect()
     }
 
@@ -213,6 +215,13 @@ impl SamlAssertion {
     pub fn raw(&self) -> &str {
         &self.raw_xml
     }
+}
+
+fn role_order(role: &str) -> (&str, &str, &str) {
+    let mut components = role.splitn(6, ':');
+    let account = components.nth(4).unwrap_or_default();
+    let resource = components.next().unwrap_or_default();
+    (account, resource, role)
 }
 
 /// Locate the `<saml:Assertion>` element. Scoped by namespace so that a
@@ -401,6 +410,40 @@ mod tests {
             &nb,
             &na,
         )
+    }
+
+    #[test]
+    fn role_order_is_stable_across_assertions_and_input_order() {
+        let roles = [
+            "arn:aws-us-gov:iam::111111111111:role/Alpha",
+            "arn:aws:iam::111111111111:role/Zebra",
+            "arn:aws:iam::222222222222:role/Alpha",
+        ];
+        let original = "<saml:AttributeValue>arn:aws:iam::123456789012:role/MyRole,arn:aws:iam::123456789012:saml-provider/MyProvider</saml:AttributeValue>";
+        for order in [[2, 0, 1], [1, 2, 0], [0, 1, 2]] {
+            let values = order
+                .into_iter()
+                .map(|index| {
+                    let role = roles[index];
+                    let provider = role
+                        .replace("role/Alpha", "saml-provider/Provider")
+                        .replace("role/Zebra", "saml-provider/Provider");
+                    format!("<saml:AttributeValue>{role},{provider}</saml:AttributeValue>")
+                })
+                .collect::<String>();
+            let assertion = SamlAssertion::parse(
+                &encode(&valid_xml().replace(original, &values)),
+                TENANT_ID,
+                AUDIENCE,
+            )
+            .unwrap();
+            let actual: Vec<_> = assertion
+                .roles()
+                .into_iter()
+                .map(|(role, _)| role)
+                .collect();
+            assert_eq!(actual, roles);
+        }
     }
 
     #[test]
