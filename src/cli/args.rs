@@ -315,17 +315,16 @@ pub fn parse_session_duration(s: &str) -> Result<i32, String> {
     Ok(v)
 }
 
-/// Validate an IAM role ARN: `arn:aws:iam::<12-digit-account>:role/<name>`.
+/// Validate an IAM role ARN in the AWS, China, or GovCloud partition.
 pub fn parse_role_arn(s: &str) -> Result<String, String> {
-    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(r"^arn:aws:iam::\d{12}:role/.+$")
-            .expect("role-ARN regex must compile — programmer error")
-    });
-    if RE.is_match(s) {
-        Ok(s.to_string())
-    } else {
-        Err("invalid IAM role ARN (expected arn:aws:iam::<account>:role/<name>)".to_string())
-    }
+    use crate::auth::aws::arn::{IamArn, IamResource};
+    IamArn::parse(s)
+        .filter(|arn| arn.resource() == IamResource::Role)
+        .map(|arn| arn.as_str().to_string())
+        .ok_or_else(|| {
+            "invalid IAM role ARN (expected arn:<partition>:iam::<12-digit-account>:role/<name>)"
+                .to_string()
+        })
 }
 
 /// AWS profile names are restricted to a safe alphanumeric subset.
