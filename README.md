@@ -283,6 +283,10 @@ Opens a browser, performs Azure AD login (MFA supported), extracts the SAML
 assertion, calls `AssumeRoleWithSAML`, and caches the resulting AWS
 credentials in the OS keyring + in-memory cache.
 
+Login overrides (`--role-arn`, `--azure-tenant`, or `--azure-app`) always
+authenticate afresh. Their credentials are returned for that invocation only;
+the profile's cached credentials and saved role remain unchanged.
+
 Useful flags:
 
 ```bash

@@ -14,6 +14,39 @@ use crate::storage::keyring::KeyringStorage;
 use crate::tui::app::RoleSelector;
 use dialoguer::Confirm;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialScope {
+    Profile,
+    Request,
+}
+
+impl CredentialScope {
+    fn for_login(arguments: &LoginArgs) -> Self {
+        if arguments.role_arn.is_some()
+            || arguments.azure_tenant.is_some()
+            || arguments.azure_app.is_some()
+        {
+            Self::Request
+        } else {
+            Self::Profile
+        }
+    }
+
+    fn load(self, profile: &str, force_refresh: bool) -> Result<Option<CredentialProcessOutput>> {
+        crate::auth::credentials::try_load_credentials(
+            profile,
+            force_refresh || self == Self::Request,
+        )
+    }
+
+    fn persist(self, credentials: &CredentialProcessOutput, profile: &str) -> Result<()> {
+        match self {
+            Self::Profile => persist_credentials(credentials, profile),
+            Self::Request => Ok(()),
+        }
+    }
+}
+
 /// Parameters for the shared login/authentication flow.
 pub struct LoginParams {
     pub profile_name: String,
@@ -39,7 +72,7 @@ pub struct LoginOutcome {
     pub role_arn: String,
 }
 
-/// Perform the full login flow: browser → SAML → role selection → STS → cache → return credentials.
+/// Perform the login flow: browser → SAML → role selection → STS → return credentials.
 pub async fn perform_login(params: &LoginParams) -> Result<LoginOutcome> {
     let mut browser = launch_browser_for_login(params).await?;
 
@@ -63,7 +96,6 @@ pub async fn perform_login(params: &LoginParams) -> Result<LoginOutcome> {
     )
     .await?;
 
-    persist_credentials(&credentials, &params.profile_name)?;
     Ok(LoginOutcome {
         credentials,
         role_arn,
@@ -167,7 +199,10 @@ fn select_role(assertion: &SamlAssertion, role_override: Option<&str>) -> Result
 /// Write fresh credentials to both the in-process cache and the OS
 /// keyring so subsequent calls (and subsequent processes) skip the
 /// browser flow.
-fn persist_credentials(credentials: &CredentialProcessOutput, profile: &str) -> Result<()> {
+pub(super) fn persist_credentials(
+    credentials: &CredentialProcessOutput,
+    profile: &str,
+) -> Result<()> {
     CacheHandle::new(profile)?.store(credentials)?;
     KeyringStorage::new(profile)?.store_credentials(credentials)?;
     Ok(())
@@ -189,10 +224,8 @@ pub async fn execute(args: &Args) -> Result<()> {
     // ask every invocation.
     crate::auth::lock::enforce(&args.profile, profile, true, login_args.session_remember)?;
 
-    // Check cache then keyring before driving a browser login.
-    if let Some(creds) =
-        crate::auth::credentials::try_load_credentials(&args.profile, login_args.force_refresh)?
-    {
+    let credential_scope = CredentialScope::for_login(&login_args);
+    if let Some(creds) = credential_scope.load(&args.profile, login_args.force_refresh)? {
         if login_args.credential_process {
             write_credentials_json(&creds)?;
             return Ok(());
@@ -250,10 +283,11 @@ pub async fn execute(args: &Args) -> Result<()> {
     };
 
     let outcome = perform_login(&params).await?;
+    credential_scope.persist(&outcome.credentials, &args.profile)?;
 
     // Save the interactively-picked role so subsequent non-interactive
     // credential-process calls don't fail with "role_arn not set".
-    if !role_was_supplied {
+    if credential_scope == CredentialScope::Profile && !role_was_supplied {
         if let Err(e) = persist_picked_role(&args.profile, &outcome.role_arn) {
             tracing::warn!("Could not save picked role to profile config: {}", e);
         }
@@ -353,7 +387,81 @@ fn mask_secret(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::mask_secret;
+    use super::*;
+
+    fn login_arguments() -> LoginArgs {
+        LoginArgs {
+            azure_tenant: None,
+            azure_app: None,
+            role_arn: None,
+            session_duration: 3600,
+            headless: false,
+            no_sandbox: false,
+            force_refresh: false,
+            output: OutputFormat::Text,
+            credential_process: false,
+            show_secrets: false,
+            remember_me: false,
+            allow_insecure_remote_chrome: false,
+            session_remember: false,
+        }
+    }
+
+    fn credentials(access_key_id: &str) -> CredentialProcessOutput {
+        CredentialProcessOutput {
+            version: 1,
+            access_key_id: access_key_id.to_string(),
+            secret_access_key: "test-secret".to_string(),
+            session_token: Some("test-token".to_string()),
+            expiration: Some((chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339()),
+        }
+    }
+
+    #[test]
+    fn identity_overrides_neither_reuse_nor_replace_profile_credentials() {
+        for override_index in 0..3 {
+            let mut arguments = login_arguments();
+            match override_index {
+                0 => arguments.role_arn = Some("arn:aws:iam::123456789012:role/Other".into()),
+                1 => arguments.azure_tenant = Some("11111111-2222-3333-4444-555555555555".into()),
+                _ => arguments.azure_app = Some("https://example.com/other-app".into()),
+            }
+            let profile = format!("override_{}", uuid::Uuid::new_v4());
+            let cache = CacheHandle::new(&profile).unwrap();
+            cache.store(&credentials("original-role")).unwrap();
+
+            let scope = CredentialScope::for_login(&arguments);
+            assert_eq!(scope, CredentialScope::Request);
+            assert!(scope.load(&profile, false).unwrap().is_none());
+            scope
+                .persist(&credentials("override-role"), &profile)
+                .unwrap();
+            assert_eq!(
+                cache
+                    .get_valid_credentials()
+                    .unwrap()
+                    .unwrap()
+                    .access_key_id,
+                "original-role"
+            );
+            cache.clear().unwrap();
+        }
+    }
+
+    #[test]
+    fn ordinary_login_reuses_profile_credentials_unless_refreshing() {
+        let profile = format!("ordinary_{}", uuid::Uuid::new_v4());
+        let cache = CacheHandle::new(&profile).unwrap();
+        cache.store(&credentials("original-role")).unwrap();
+        let scope = CredentialScope::for_login(&login_arguments());
+        assert_eq!(scope, CredentialScope::Profile);
+        assert_eq!(
+            scope.load(&profile, false).unwrap().unwrap().access_key_id,
+            "original-role"
+        );
+        assert!(scope.load(&profile, true).unwrap().is_none());
+        cache.clear().unwrap();
+    }
 
     #[test]
     fn test_mask_secret_short() {

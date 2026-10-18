@@ -3,7 +3,7 @@
 use crate::browser::chromium::AzureLoginBrowser;
 use crate::cli::args::Args;
 use crate::cli::args::Command;
-use crate::cli::commands::login::{perform_login, LoginParams};
+use crate::cli::commands::login::{perform_login, persist_credentials, LoginParams};
 use crate::config::{self, Config};
 use crate::credential_process::protocol::write_credentials_json;
 use crate::error::{AwzarsError, Result};
@@ -110,6 +110,7 @@ pub async fn execute(args: &Args) -> Result<()> {
     };
 
     let outcome = perform_login(&params).await?;
+    persist_credentials(&outcome.credentials, &args.profile)?;
     write_credentials_json(&outcome.credentials)?;
     Ok(())
 }
