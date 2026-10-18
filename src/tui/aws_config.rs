@@ -1,5 +1,8 @@
 //! AWS config (~/.aws/config) parser and writer for awzars integration
 
+#[cfg(test)]
+mod regression_tests;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -224,7 +227,12 @@ fn parse_aws_config(contents: &str) -> Vec<AwsProfileEntry> {
             continue;
         }
 
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if let Some(header) = trimmed
+            .strip_prefix('[')
+            .and_then(|line| line.split_once(']'))
+            .map(|(header, _)| header)
+            .filter(|header| !header.is_empty())
+        {
             flush_section(
                 &mut current_section,
                 &mut current_region,
@@ -236,7 +244,6 @@ fn parse_aws_config(contents: &str) -> Vec<AwsProfileEntry> {
                 &mut entries,
             );
 
-            let header = &trimmed[1..trimmed.len() - 1];
             current_section = Some(if header == "default" {
                 "default".to_string()
             } else if let Some(name) = header.strip_prefix("profile ") {
