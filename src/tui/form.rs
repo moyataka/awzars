@@ -457,6 +457,7 @@ pub struct AwsProfileForm {
     pub original_name: Option<String>,
     /// Stored original values for cancel
     pub original_values: Vec<String>,
+    original_extra: HashMap<String, String>,
     /// Was this profile using awzars before editing?
     pub originally_uses_awzars: bool,
     /// Available awzars profile names for autocomplete
@@ -518,6 +519,7 @@ impl AwsProfileForm {
             focused: 0,
             original_name: Some(entry.name.clone()),
             original_values,
+            original_extra: entry.extra.clone(),
             originally_uses_awzars: entry.uses_awzars,
             awzars_profiles,
             suggestions: Vec::new(),
@@ -548,6 +550,7 @@ impl AwsProfileForm {
             original_name: None,
             original_values,
             originally_uses_awzars: false,
+            original_extra: HashMap::new(),
             awzars_profiles,
             suggestions: Vec::new(),
             suggestion_selected: 0,
@@ -894,9 +897,11 @@ impl AwsProfileForm {
             .as_ref()
             .and_then(|c| super::aws_config::extract_awzars_profile(c));
 
-        let mut extra = HashMap::new();
+        let mut extra = self.original_extra.clone();
         if !output_val.is_empty() {
             extra.insert("output".to_string(), output_val);
+        } else {
+            extra.remove("output");
         }
 
         Ok(AwsProfileEntry {

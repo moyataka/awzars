@@ -53,6 +53,56 @@ fn save_preserves_sections_comments_and_nested_settings() {
 }
 
 #[test]
+fn editing_region_preserves_unexposed_settings_and_original_text() {
+    let (_directory, path) = config_file(SHARED_CONFIG);
+    let mut profiles = load_aws_integration(path.to_str()).all_profiles;
+    let mut form = AwsProfileForm::from_entry(&profiles[1], Vec::new(), Vec::new());
+    form.fields[AWS_IDX_REGION].value = "eu-west-1".to_string();
+    let edited = form.to_entry().unwrap();
+
+    assert_eq!(edited.extra, profiles[1].extra);
+    profiles[1] = edited;
+    save_aws_config(&profiles, path.to_str()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        SHARED_CONFIG.replacen("region  = us-west-2", "region  = eu-west-1", 1)
+    );
+}
+
+#[test]
+fn changing_or_clearing_output_preserves_other_settings() {
+    for output in ["text", ""] {
+        let (_directory, path) = config_file(SHARED_CONFIG);
+        let mut profiles = load_aws_integration(path.to_str()).all_profiles;
+        let mut form = AwsProfileForm::from_entry(&profiles[1], Vec::new(), Vec::new());
+        form.fields
+            .iter_mut()
+            .find(|field| field.label == "Output")
+            .unwrap()
+            .value = output.to_string();
+        profiles[1] = form.to_entry().unwrap();
+
+        let expected_setting = if output.is_empty() {
+            String::new()
+        } else {
+            format!("output = {output}\n")
+        };
+        let original_setting =
+            "credential_process = awzars credential-process --profile engineering\noutput = json\n";
+        let replacement = format!("credential_process = awzars credential-process --profile engineering\n{expected_setting}");
+        save_aws_config(&profiles, path.to_str()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            SHARED_CONFIG.replace(original_setting, &replacement)
+        );
+        assert_eq!(
+            load_aws_integration(path.to_str()).all_profiles[1].extra,
+            profiles[1].extra
+        );
+    }
+}
+
+#[test]
 fn renaming_preserves_the_section_body_and_header_comment() {
     let contents = SHARED_CONFIG.replace(
         "[profile engineering]",
@@ -60,7 +110,13 @@ fn renaming_preserves_the_section_body_and_header_comment() {
     );
     let (_directory, path) = config_file(&contents);
     let mut profiles = load_aws_integration(path.to_str()).all_profiles;
-    profiles[1].name = "development".to_string();
+    let mut form = AwsProfileForm::from_entry(&profiles[1], Vec::new(), Vec::new());
+    form.fields
+        .iter_mut()
+        .find(|field| field.label == "Profile Name")
+        .unwrap()
+        .value = "development".to_string();
+    profiles[1] = form.to_entry().unwrap();
 
     save_aws_config(&profiles, path.to_str()).unwrap();
     assert_eq!(
