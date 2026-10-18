@@ -71,16 +71,20 @@ pub fn delete_awzars_profile(name: &str) -> Result<ProfileDeletionReport> {
         warnings.push(format!("session unlock token: {}", e));
     }
 
-    let orphaned_aws_profiles = aws_config::load_aws_integration(None)
-        .for_awzars_profile(name)
-        .iter()
-        .map(|p| p.name.clone())
-        .collect();
+    let orphaned_aws_profiles = linked_aws_profiles(&config, name);
 
     Ok(ProfileDeletionReport {
         orphaned_aws_profiles,
         warnings,
     })
+}
+
+fn linked_aws_profiles(config: &super::Config, name: &str) -> Vec<String> {
+    aws_config::load_aws_integration(config.aws_config_path.as_deref())
+        .for_awzars_profile(name)
+        .iter()
+        .map(|profile| profile.name.clone())
+        .collect()
 }
 
 /// Wipe cached and persisted STS credentials for a profile while leaving the
@@ -122,6 +126,20 @@ pub fn credential_identity_changed(prev: &Profile, next: &Profile) -> bool {
 mod tests {
     use super::*;
     use crate::config::AzureConfig;
+
+    #[test]
+    fn orphan_scan_uses_the_configured_aws_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom-aws-config");
+        std::fs::write(&path, "[profile work]\ncredential_process = /usr/bin/awzars credential-process --profile deleted\n[profile other]\ncredential_process = /usr/bin/awzars credential-process --profile retained\n").unwrap();
+        let config = super::super::Config {
+            aws_config_path: Some(path.to_string_lossy().into()),
+            ..Default::default()
+        };
+        assert_eq!(linked_aws_profiles(&config, "deleted"), ["work"]);
+        assert_eq!(linked_aws_profiles(&config, "retained"), ["other"]);
+        assert!(linked_aws_profiles(&config, "absent").is_empty());
+    }
 
     fn profile_with(tenant: &str, app: &str, role: Option<&str>) -> Profile {
         Profile {

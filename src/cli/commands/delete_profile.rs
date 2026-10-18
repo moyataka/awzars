@@ -32,13 +32,13 @@ pub fn run(profile: &str, yes: bool) -> Result<()> {
 
     if !report.orphaned_aws_profiles.is_empty() {
         eprintln!(
-            "\nThe following ~/.aws/config profiles still reference '{}':",
+            "\nThe following profiles in your configured AWS file still reference '{}':",
             profile
         );
         for p in &report.orphaned_aws_profiles {
             eprintln!("  - {}", p);
         }
-        eprintln!("Edit ~/.aws/config to remove or repoint them.");
+        eprintln!("Edit your configured AWS file to remove or repoint them.");
     }
 
     Ok(())

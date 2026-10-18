@@ -584,7 +584,7 @@ impl ConfigManager {
                                 );
                                 if !orphans.is_empty() {
                                     msg.push_str(&format!(
-                                        ". ~/.aws/config still references this profile in: {} (edit to remove)",
+                                        ". The configured AWS file still references this profile in: {} (edit to remove)",
                                         orphans.join(", ")
                                     ));
                                 }
@@ -593,7 +593,7 @@ impl ConfigManager {
                                 self.status = Some((
                                     StatusLevel::Warning,
                                     format!(
-                                        "Profile '{}' deleted. ~/.aws/config still references this profile in: {} (edit ~/.aws/config to remove)",
+                                        "Profile '{}' deleted. The configured AWS file still references this profile in: {} (edit to remove)",
                                         target,
                                         orphans.join(", ")
                                     ),
