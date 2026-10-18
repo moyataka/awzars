@@ -405,10 +405,9 @@ impl AzureLoginBrowser {
 
         self.page = Some(page.clone());
 
-        // Inject saved cookies for local headless re-auth (from remote Chrome sessions).
-        // This enables credential-process to silently re-authenticate without needing
-        // a persistent Chrome user-data-dir (avoids SingletonLock conflicts).
-        if !self.is_remote && self.headless {
+        // Headed and headless local sessions both reuse the encrypted cookie
+        // store, including when it replaces a persistent user-data directory.
+        if !self.is_remote {
             if let Err(e) = self.inject_cookies_from_store(browser).await {
                 tracing::debug!("Cookie injection skipped: {}", e);
             }
@@ -440,7 +439,7 @@ impl AzureLoginBrowser {
     }
 
     /// Extract all cookies from the current browser session and save them to
-    /// the local cookie store. Called after successful remote Chrome auth to
+    /// the local cookie store. Called after successful remembered auth to
     /// enable subsequent local headless re-authentication.
     pub async fn save_cookies(&self) -> Result<()> {
         // Fail-closed if a legacy plaintext cookies.json is still on disk.

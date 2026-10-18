@@ -117,7 +117,7 @@ async fn launch_browser_for_login(params: &LoginParams) -> Result<AzureLoginBrow
         }
     }
 
-    // Use a cookie store (from a prior remote-Chrome login) if one exists,
+    // Use a cookie store from a prior remembered login if one exists,
     // even if --remember-me was passed: a persistent user-data-dir would
     // race with any other Chrome holding the profile via SingletonLock.
     let use_cookie_store = AzureLoginBrowser::has_cookie_store(&params.profile_name);
@@ -146,8 +146,7 @@ async fn launch_browser_for_login(params: &LoginParams) -> Result<AzureLoginBrow
 }
 
 /// Drive the browser through Azure AD login and return the SAML response.
-/// Persists session cookies for future local re-auth when running against
-/// a remote Chrome with --remember-me.
+/// Persists session cookies for future local re-auth with --remember-me.
 ///
 /// The SAML response is returned in `Zeroizing<String>` so the heap copy is
 /// wiped on drop. `SamlAssertion::parse` accepts `&str` and deref-coerces
@@ -160,7 +159,7 @@ async fn authenticate(
         .login_and_get_saml(&params.tenant_id, &params.app_id_uri)
         .await?;
 
-    if browser.is_remote() && params.remember_me {
+    if params.remember_me {
         if let Err(e) = browser.save_cookies().await {
             tracing::warn!("Failed to save cookies for local re-auth: {}", e);
         }

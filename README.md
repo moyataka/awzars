@@ -425,8 +425,10 @@ export CHROME_REMOTE_URL="wss://chrome-host:9222/devtools/browser/<id>"
 awzars login --remember-me
 ```
 
-After the first `--remember-me` login via remote Chrome, session cookies are
-extracted and saved locally (encrypted), so subsequent
+After a successful `--remember-me` login via local or remote Chrome, session
+cookies are saved locally (encrypted). Local headed and headless logins reuse
+this store; a remembered login refreshes it, including after expired cookies
+require an interactive sign-in. Subsequent
 `awzars credential-process` calls run against **local** headless Chrome —
 no remote instance needed for refreshes.
 
