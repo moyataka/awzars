@@ -32,9 +32,15 @@ impl CredentialScope {
         }
     }
 
-    fn load(self, profile: &str, force_refresh: bool) -> Result<Option<CredentialProcessOutput>> {
+    fn load(
+        self,
+        profile: &str,
+        session_duration: i32,
+        force_refresh: bool,
+    ) -> Result<Option<CredentialProcessOutput>> {
         crate::auth::credentials::try_load_credentials(
             profile,
+            session_duration,
             force_refresh || self == Self::Request,
         )
     }
@@ -229,7 +235,11 @@ pub async fn execute(args: &Args) -> Result<()> {
     let _refresh_guard =
         crate::auth::credentials::CredentialRefreshGuard::acquire(&args.profile).await?;
     let credential_scope = CredentialScope::for_login(&login_args);
-    if let Some(creds) = credential_scope.load(&args.profile, login_args.refresh_requested())? {
+    if let Some(creds) = credential_scope.load(
+        &args.profile,
+        profile.azure.session_duration,
+        login_args.refresh_requested(),
+    )? {
         if login_args.credential_process {
             write_credentials_json(&creds)?;
             return Ok(());
@@ -507,13 +517,13 @@ mod tests {
 
             let scope = CredentialScope::for_login(&arguments);
             assert_eq!(scope, CredentialScope::Request);
-            assert!(scope.load(&profile, false).unwrap().is_none());
+            assert!(scope.load(&profile, 3600, false).unwrap().is_none());
             scope
                 .persist(&credentials("override-role"), &profile)
                 .unwrap();
             assert_eq!(
                 cache
-                    .get_valid_credentials()
+                    .get_valid_credentials(3600)
                     .unwrap()
                     .unwrap()
                     .access_key_id,
@@ -531,10 +541,14 @@ mod tests {
         let scope = CredentialScope::for_login(&login_arguments());
         assert_eq!(scope, CredentialScope::Profile);
         assert_eq!(
-            scope.load(&profile, false).unwrap().unwrap().access_key_id,
+            scope
+                .load(&profile, 3600, false)
+                .unwrap()
+                .unwrap()
+                .access_key_id,
             "original-role"
         );
-        assert!(scope.load(&profile, true).unwrap().is_none());
+        assert!(scope.load(&profile, 3600, true).unwrap().is_none());
         cache.clear().unwrap();
     }
 

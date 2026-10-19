@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - TUI: saving an AWS profile applies only that change to the current ~/.aws/config, keeping profiles and settings edited elsewhere while the TUI is open (#24).
 - CLI: `-q/--quiet` is honoured (#17); inline AI consent requires an interactive stderr (#14).
 - Docs: per-platform configuration paths (#19).
+- Credentials from short sessions (under 30 minutes) are reused from the cache instead of re-running the browser login on every call (#22).
 - Keychain read errors are reported instead of being treated as a missing entry, so existing keys are kept.
 
 ## [1.0.3] - 2026-06-17
