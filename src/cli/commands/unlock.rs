@@ -20,7 +20,7 @@
 //! `UnlockToken::is_expired` treats as "never". The token still dies with
 //! the terminal session — `$XDG_RUNTIME_DIR` is tmpfs (auto-reaped on
 //! logout) and `gc_stale_unlocks` drops tokens whose SID is no longer
-//! alive. There is no time fallback, so a forgotten unlock on a
+//! alive — and with a reboot, since tokens are bound to the boot. There is no time fallback, so a forgotten unlock on a
 //! long-lived session has no safety net beyond logging out.
 
 use crate::auth::lock;
@@ -88,6 +88,7 @@ pub fn run(
     };
 
     if let Some(phc) = profile.lock_verifier.as_deref() {
+        lock::ensure_session_unlock_available()?;
         let pw: lock::PasswordInput = Zeroizing::new(
             dialoguer::Password::new()
                 .with_prompt(format!("Password for awzars profile '{}'", profile_name))
@@ -117,6 +118,7 @@ pub fn run(
     // under Claude Code's Bash tool — the explicit `--allow-ai` flag *is*
     // the consent, and the AI tool's own command-approval layer has already
     // prompted the user. Skip the prompt rather than hanging.
+    lock::ensure_session_unlock_available()?;
     if stdin_is_tty {
         let answer = dialoguer::Confirm::new()
             .with_prompt(format!(

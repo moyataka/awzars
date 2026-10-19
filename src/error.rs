@@ -82,6 +82,12 @@ pub enum AwzarsError {
 
     #[error("Lock and unlock require an interactive terminal (TTY).")]
     LockRequiresTty,
+
+    #[error(
+        "Cannot determine the current boot session; session unlock is \
+         unavailable in this environment."
+    )]
+    SessionUnlockUnavailable,
 }
 
 impl From<toml::de::Error> for AwzarsError {
