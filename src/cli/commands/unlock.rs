@@ -95,7 +95,7 @@ pub fn run(
                 .map_err(|e| AwzarsError::Dialog(e.to_string()))?,
         );
         lock::verify_password_or_fail(&pw, phc, profile_name)?;
-        let token = lock::write_unlock(profile_name, ttl_secs, allow_ai, true)?;
+        let token = lock::write_unlock(profile_name, ttl_secs, allow_ai, true, Some(phc))?;
         print_unlocked(profile_name, &token, quiet);
         return Ok(());
     }
@@ -135,7 +135,7 @@ pub fn run(
         }
     }
 
-    let token = lock::write_unlock(profile_name, ttl_secs, true, false)?;
+    let token = lock::write_unlock(profile_name, ttl_secs, true, false, None)?;
     print_unlocked(profile_name, &token, quiet);
     Ok(())
 }

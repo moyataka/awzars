@@ -668,10 +668,37 @@ fn token_path(scope: &SessionScope, profile: &str) -> Result<PathBuf> {
     Ok(unlock_dir()?.join(format!("{}-{}.json", scope.key(), profile)))
 }
 
+/// Token format version written by this build. Tokens with a lower version
+/// predate the lock-verifier binding and are never honoured.
+const UNLOCK_TOKEN_VERSION: u8 = 2;
+
+/// Domain-separation prefix for `verifier_fingerprint`.
+const VERIFIER_FP_DOMAIN: &[u8] = b"awzars-unlock-verifier-v1\0";
+
+/// Fingerprint of a profile's lock verifier (PHC string), stored in a token so
+/// it only counts while the profile still holds the verifier it was minted
+/// under. Truncated SHA-256 (128 bits) in hex: an equality tag, not a secret.
+fn verifier_fingerprint(phc: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(VERIFIER_FP_DOMAIN);
+    hasher.update(phc.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .take(16)
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
 /// In-session approval record. Existence (under the current SID) means the
 /// terminal session has cleared the gate for this profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnlockToken {
+    /// Token format version (`UNLOCK_TOKEN_VERSION`). Absent (`0`) in tokens
+    /// written by older builds, which are rejected on read.
+    #[serde(default)]
+    pub v: u8,
     pub profile: String,
     /// Type-tagged session-scope key (`sid-<n>` or `env-<key>`) this token is
     /// bound to. Compared verbatim against the current scope on read.
@@ -692,6 +719,12 @@ pub struct UnlockToken {
     /// degrades to scope-key + TTL, matching pre-fix behaviour.
     #[serde(default)]
     pub start_time: Option<u64>,
+    /// `verifier_fingerprint` of the profile's lock verifier when the token
+    /// was minted; `None` if the profile had no password lock. `enforce`
+    /// requires it to match the profile's current verifier, so a token stops
+    /// counting once the lock is set, changed or removed.
+    #[serde(default)]
+    pub verifier_fp: Option<String>,
 }
 
 impl UnlockToken {
@@ -713,15 +746,19 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Persist an unlock/consent token for the current session.
+/// Persist an unlock/consent token for the current session. `verifier` is the
+/// profile's current `lock_verifier` (`None` for an unlocked profile); the
+/// token is bound to it.
 pub fn write_unlock(
     profile: &str,
     ttl_secs: u64,
     allow_ai: bool,
     password_unlocked: bool,
+    verifier: Option<&str>,
 ) -> Result<UnlockToken> {
     let scope = session_scope()?;
     let token = UnlockToken {
+        v: UNLOCK_TOKEN_VERSION,
         profile: profile.to_string(),
         scope_key: scope.key(),
         created_at: now_unix(),
@@ -729,6 +766,7 @@ pub fn write_unlock(
         allow_ai,
         password_unlocked,
         start_time: scope.start_time(),
+        verifier_fp: verifier.map(verifier_fingerprint),
     };
     let path = token_path(&scope, profile)?;
     let bytes = serde_json::to_vec(&token)?;
@@ -744,6 +782,11 @@ pub fn read_valid_unlock(profile: &str) -> Option<UnlockToken> {
     let bytes = std::fs::read(&path).ok()?;
     let token: UnlockToken = serde_json::from_slice(&bytes).ok()?;
     if token.scope_key != scope.key() || token.profile != profile {
+        return None;
+    }
+    // Tokens from an older format carry no lock binding; never honour them.
+    if token.v < UNLOCK_TOKEN_VERSION {
+        let _ = std::fs::remove_file(&path);
         return None;
     }
     // PID-reuse defence (sid- scope only): if the token recorded a
@@ -957,12 +1000,11 @@ pub fn enforce(
     allow_inline_prompt: bool,
     persist_consent: bool,
 ) -> Result<GateOutcome> {
-    let is_locked = profile.lock_verifier.is_some();
     let markers = effective_markers(profile);
     let ai_marker = is_ai_context(&markers);
 
     // Fast path: nothing to enforce.
-    if !is_locked && ai_marker.is_none() {
+    if profile.lock_verifier.is_none() && ai_marker.is_none() {
         return Ok(GateOutcome::NotLocked);
     }
 
@@ -972,10 +1014,14 @@ pub fn enforce(
     // not applied here: re-typing a password on every aws call would be
     // unworkable, so a successful inline password prompt always writes a
     // session token (subject to the configured TTL).
-    if is_locked {
-        let token_ok = token
-            .as_ref()
-            .is_some_and(|t| t.password_unlocked && (ai_marker.is_none() || t.allow_ai));
+    if let Some(phc) = profile.lock_verifier.as_deref() {
+        // The token must have been minted under the profile's current lock.
+        let current_fp = verifier_fingerprint(phc);
+        let token_ok = token.as_ref().is_some_and(|t| {
+            t.password_unlocked
+                && t.verifier_fp.as_deref() == Some(current_fp.as_str())
+                && (ai_marker.is_none() || t.allow_ai)
+        });
 
         if token_ok {
             return Ok(GateOutcome::AlreadyUnlocked);
@@ -997,14 +1043,9 @@ pub fn enforce(
         if allow_inline_prompt && tty_available() {
             let pw =
                 read_password_via_tty(&format!("Password for awzars profile '{}'", profile_name))?;
-
-            let phc = profile
-                .lock_verifier
-                .as_deref()
-                .expect("checked is_locked above");
             verify_password_or_fail(&pw, phc, profile_name)?;
             let ttl = resolve_ttl_secs(None, profile);
-            write_unlock(profile_name, ttl, false, true)?;
+            write_unlock(profile_name, ttl, false, true, Some(phc))?;
             return Ok(GateOutcome::UnlockedNow { allow_ai: false });
         }
 
@@ -1019,7 +1060,11 @@ pub fn enforce(
     // invocation and the answer is NOT persisted. The caller can opt into
     // session-scoped remembering by passing `persist_consent = true`
     // (typically driven by the user's `--session-remember` flag).
-    let consent_ok = token.as_ref().is_some_and(|t| t.allow_ai);
+    // A consent token minted while the profile had a password lock does not
+    // carry over once that lock is removed.
+    let consent_ok = token
+        .as_ref()
+        .is_some_and(|t| t.allow_ai && t.verifier_fp.is_none());
     if consent_ok {
         return Ok(GateOutcome::AlreadyUnlocked);
     }
@@ -1054,7 +1099,7 @@ pub fn enforce(
         }
         if persist_consent {
             let ttl = resolve_ttl_secs(None, profile);
-            write_unlock(profile_name, ttl, true, false)?;
+            write_unlock(profile_name, ttl, true, false, None)?;
             return Ok(GateOutcome::UnlockedNow { allow_ai: true });
         }
         return Ok(GateOutcome::ConsentedOnce);
@@ -1138,6 +1183,122 @@ mod tests {
             _tmp: tmp,
             _lock: lock,
         }
+    }
+
+    /// Stand-in PHC strings: tokens bind to a hash of the verifier string, so
+    /// the gate tests need no (slow) real Argon2 hash.
+    const TEST_VERIFIER: &str = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$first";
+    const TEST_VERIFIER_2: &str = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$second";
+
+    /// A password-locked profile with AI detection disabled, so the gate's
+    /// answer depends only on the token (cargo test may run under an agent).
+    fn locked_profile(verifier: &str) -> Profile {
+        Profile {
+            lock_verifier: Some(verifier.into()),
+            lock_ai_markers: Some(vec![]),
+            ..Default::default()
+        }
+    }
+
+    fn is_already_unlocked(outcome: Result<GateOutcome>) -> bool {
+        matches!(outcome, Ok(GateOutcome::AlreadyUnlocked))
+    }
+
+    #[test]
+    fn verifier_fingerprint_is_stable_and_distinct() {
+        let fp = verifier_fingerprint(TEST_VERIFIER);
+        assert_eq!(fp.len(), 32);
+        assert!(fp.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(fp, verifier_fingerprint(TEST_VERIFIER));
+        assert_ne!(fp, verifier_fingerprint(TEST_VERIFIER_2));
+    }
+
+    #[test]
+    fn token_honoured_only_under_the_verifier_it_was_minted_with() {
+        let _g = temp_xdg();
+        let prof = format!("test_vfp_{}", std::process::id());
+        write_unlock(&prof, 3600, false, true, Some(TEST_VERIFIER)).unwrap();
+
+        assert!(is_already_unlocked(enforce(
+            &prof,
+            &locked_profile(TEST_VERIFIER),
+            false,
+            false
+        )));
+        // Same profile name, different lock (password changed, or the profile
+        // was deleted and re-created): the old token no longer counts.
+        assert!(matches!(
+            enforce(&prof, &locked_profile(TEST_VERIFIER_2), false, false),
+            Err(AwzarsError::LockedProfile { .. })
+        ));
+        let _ = remove_unlock(&prof);
+    }
+
+    #[test]
+    fn legacy_format_token_is_not_honoured() {
+        let _g = temp_xdg();
+        let prof = format!("test_legacy_{}", std::process::id());
+        let scope = session_scope().unwrap();
+        let path = token_path(&scope, &prof).unwrap();
+        // The pre-binding token shape: no `v`, no verifier fingerprint.
+        let legacy = serde_json::json!({
+            "profile": prof,
+            "scope_key": scope.key(),
+            "created_at": now_unix(),
+            "ttl_secs": 3600,
+            "allow_ai": true,
+            "password_unlocked": true,
+            "start_time": scope.start_time(),
+        });
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            enforce(&prof, &locked_profile(TEST_VERIFIER), false, false),
+            Err(AwzarsError::LockedProfile { .. })
+        ));
+        assert!(!path.exists(), "a legacy token is removed when read");
+
+        // Same for AI consent on an unlocked profile.
+        let marker = format!("AWZARS_TEST_LEGACY_AI_{}", std::process::id());
+        std::env::set_var(&marker, "1");
+        let consent_profile = Profile {
+            lock_ai_markers: Some(vec![marker.clone()]),
+            ..Default::default()
+        };
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            enforce(&prof, &consent_profile, false, false),
+            Err(AwzarsError::AiContextBlocked { .. })
+        ));
+        assert!(!path.exists());
+        std::env::remove_var(&marker);
+    }
+
+    #[test]
+    fn ai_consent_token_requires_an_unlocked_binding() {
+        let _g = temp_xdg();
+        let prof = format!("test_consent_{}", std::process::id());
+        let marker = format!("AWZARS_TEST_CONSENT_AI_{}", std::process::id());
+        std::env::set_var(&marker, "1");
+        let unlocked = Profile {
+            lock_ai_markers: Some(vec![marker.clone()]),
+            ..Default::default()
+        };
+
+        // Consent granted on an unlocked profile keeps working.
+        write_unlock(&prof, 3600, true, false, None).unwrap();
+        assert!(is_already_unlocked(enforce(&prof, &unlocked, false, false)));
+
+        // A token minted while the profile had a lock stops counting for AI
+        // consent once the lock is removed.
+        write_unlock(&prof, 3600, true, true, Some(TEST_VERIFIER)).unwrap();
+        assert!(matches!(
+            enforce(&prof, &unlocked, false, false),
+            Err(AwzarsError::AiContextBlocked { .. })
+        ));
+        std::env::remove_var(&marker);
+        let _ = remove_unlock(&prof);
     }
 
     #[test]
@@ -1249,7 +1410,7 @@ mod tests {
         let prof = format!("test_st_{}", std::process::id());
         let _ = remove_unlock(&prof);
 
-        let token = write_unlock(&prof, 3600, false, true).unwrap();
+        let token = write_unlock(&prof, 3600, false, true, Some(TEST_VERIFIER)).unwrap();
         // On Linux we must capture a start_time; elsewhere it's best-effort.
         if cfg!(target_os = "linux") {
             assert!(
@@ -1276,6 +1437,7 @@ mod tests {
         // current session leader's, then verify read_valid_unlock rejects it.
         let scope = session_scope().unwrap();
         let bogus = UnlockToken {
+            v: UNLOCK_TOKEN_VERSION,
             profile: prof.clone(),
             scope_key: scope.key(),
             created_at: now_unix(),
@@ -1283,6 +1445,7 @@ mod tests {
             allow_ai: false,
             password_unlocked: true,
             start_time: Some(u64::MAX),
+            verifier_fp: Some(verifier_fingerprint(TEST_VERIFIER)),
         };
         let path = token_path(&scope, &prof).unwrap();
         std::fs::write(&path, serde_json::to_vec(&bogus).unwrap()).unwrap();
@@ -1299,7 +1462,7 @@ mod tests {
         let _ = remove_unlock(&prof);
 
         assert!(read_valid_unlock(&prof).is_none());
-        let written = write_unlock(&prof, 3600, true, true).unwrap();
+        let written = write_unlock(&prof, 3600, true, true, Some(TEST_VERIFIER)).unwrap();
         let read = read_valid_unlock(&prof).expect("token should exist");
         assert_eq!(read.profile, written.profile);
         assert_eq!(read.scope_key, written.scope_key);
@@ -1321,6 +1484,7 @@ mod tests {
         // is now the "never expires" sentinel, not "instantly expired".
         let scope = session_scope().unwrap();
         let stale = UnlockToken {
+            v: UNLOCK_TOKEN_VERSION,
             profile: prof.clone(),
             scope_key: scope.key(),
             created_at: now_unix().saturating_sub(3600),
@@ -1328,6 +1492,7 @@ mod tests {
             allow_ai: false,
             password_unlocked: true,
             start_time: scope.start_time(),
+            verifier_fp: Some(verifier_fingerprint(TEST_VERIFIER)),
         };
         let path = token_path(&scope, &prof).unwrap();
         std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
@@ -1344,7 +1509,7 @@ mod tests {
         let _ = remove_unlock(&prof);
 
         // ttl_secs = 0 is the --no-expire sentinel: token must remain valid.
-        write_unlock(&prof, 0, true, false).unwrap();
+        write_unlock(&prof, 0, true, false, None).unwrap();
         let read = read_valid_unlock(&prof).expect("no-expire token must be valid");
         assert_eq!(read.ttl_secs, 0);
         assert!(!read.is_expired(now_unix()));
@@ -1512,7 +1677,7 @@ mod tests {
         let prof = format!("test_env_rt_{}", std::process::id());
         let _ = remove_unlock(&prof);
 
-        let written = write_unlock(&prof, 3600, true, false).unwrap();
+        let written = write_unlock(&prof, 3600, true, false, None).unwrap();
         assert_eq!(written.scope_key, "env-roundtrip_box");
         assert!(written.start_time.is_none(), "env scope binds no PID");
 
