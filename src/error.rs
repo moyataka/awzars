@@ -85,8 +85,9 @@ pub enum AwzarsError {
 
     #[error(
         "Another awzars login or credential refresh for profile '{profile}' is in \
-         progress (for example a login waiting for browser sign-in or a prompt); \
-         waited {waited_secs}s. Retry once it finishes."
+         progress (for example a login waiting for browser sign-in); waited \
+         {waited_secs}s. Retry once it finishes, or raise \
+         AWZARS_REFRESH_LOCK_TIMEOUT_SECS."
     )]
     RefreshLockTimeout { profile: String, waited_secs: u128 },
 }

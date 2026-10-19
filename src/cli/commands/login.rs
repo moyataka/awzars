@@ -316,19 +316,26 @@ pub async fn execute(args: &Args) -> Result<()> {
         allow_insecure_remote_chrome: login_args.allow_insecure_remote_chrome,
     };
 
-    // Identity overrides (request scope) neither read nor write the profile's
-    // stored credentials, so they do not take the profile's refresh lock.
-    let mut refresh_guard = None;
-    if credential_scope == CredentialScope::Profile {
-        let (guard, refreshed) =
-            lock_and_recheck(&args.profile, session_duration, force_refresh).await?;
-        if let Some(creds) = refreshed {
-            return output_credentials(&creds, &login_args, args.quiet);
+    // Profile scope re-checks stored credentials once it holds the lock.
+    // Identity overrides (request scope) never read or write them, but still
+    // hold the lock through the browser phase: it reads and may rotate the
+    // profile's cookie keystore, a read-modify-write that must not interleave.
+    let mut refresh_guard = Some(match credential_scope {
+        CredentialScope::Profile => {
+            let (guard, refreshed) =
+                lock_and_recheck(&args.profile, session_duration, force_refresh).await?;
+            if let Some(creds) = refreshed {
+                return output_credentials(&creds, &login_args, args.quiet);
+            }
+            guard
         }
-        refresh_guard = Some(guard);
-    }
+        CredentialScope::Request => CredentialRefreshGuard::acquire(&args.profile).await?,
+    });
 
     let sign_in = sign_in(&params).await?;
+    if credential_scope == CredentialScope::Request {
+        drop(refresh_guard.take());
+    }
     let role_arn = if role_pick_is_interactive(&sign_in.assertion, params.role_arn.as_deref()) {
         // Never hold the lock while a human picks a role: every other refresh
         // of this profile would wait on the selector (#23).
@@ -341,7 +348,8 @@ pub async fn execute(args: &Args) -> Result<()> {
                 // Another login stored credentials while the role was being
                 // chosen. Reuse them when they are for the same role; otherwise
                 // the explicit choice made here replaces them, visibly.
-                if configured_role(&args.profile)?.as_deref() == Some(role_arn.as_str()) {
+                let configured = configured_role(&args.profile)?;
+                if reuse_after_role_pick(configured.as_deref(), &role_arn) {
                     return output_credentials(&creds, &login_args, args.quiet);
                 }
                 tracing::warn!(
@@ -383,6 +391,13 @@ async fn lock_and_recheck(
     let guard = CredentialRefreshGuard::acquire(profile).await?;
     let stored = CredentialScope::Profile.load(profile, session_duration, force_refresh)?;
     Ok((guard, stored))
+}
+
+/// Whether credentials another login stored while this one's role was being
+/// picked can be reused: only when the profile is now configured for the
+/// same role. Otherwise the role picked here replaces them.
+fn reuse_after_role_pick(configured_role: Option<&str>, picked_role: &str) -> bool {
+    configured_role == Some(picked_role)
 }
 
 /// The role ARN currently saved in the profile's configuration.
@@ -550,63 +565,19 @@ mod tests {
 
     #[tokio::test]
     async fn cached_login_does_not_wait_for_the_refresh_lock() {
+        use crate::auth::credentials::refresh_lock::test_support;
         use clap::Parser;
-        if let Ok(directory) = std::env::var("AWZARS_LOCKED_LOGIN_DIRECTORY") {
-            config::set_config_dir_override(&directory).unwrap();
-            let mut config = Config::default();
-            config.set_profile(
-                "default",
-                crate::config::Profile {
-                    lock_ai_markers: Some(vec![]),
-                    ..Default::default()
-                },
-            );
-            config.save().unwrap();
-            CacheHandle::new("default")
-                .unwrap()
-                .store(&credentials("cached-output"))
-                .unwrap();
+        if let Ok(directory) = std::env::var(test_support::CHILD_DIRECTORY_ENV) {
+            test_support::prepare_cached_default_profile(&directory);
             let arguments = ["awzars", "login", "--credential-process"];
             execute(&Args::try_parse_from(arguments).unwrap())
                 .await
                 .unwrap();
             return;
         }
-
-        // Hold the profile's refresh lock the way a login waiting for browser
-        // sign-in would, then run a login that has valid cached credentials.
-        let directory = tempfile::tempdir().unwrap();
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(directory.path().join("refresh-default.lock"))
-            .unwrap();
-        lock.lock().unwrap();
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "cli::commands::login::tests::cached_login_does_not_wait_for_the_refresh_lock",
-                "--nocapture",
-            ])
-            .env("AWZARS_LOCKED_LOGIN_DIRECTORY", directory.path())
-            .env("AWZARS_REFRESH_LOCK_TIMEOUT_SECS", "600")
-            .env_remove("AWZARS_AZURE_TENANT_ID")
-            .env_remove("AWZARS_AZURE_APP_ID_URI")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while child.try_wait().unwrap().is_none() {
-            if std::time::Instant::now() > deadline {
-                child.kill().unwrap();
-                panic!("a login with cached credentials waited on the refresh lock");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        let output = child.wait_with_output().unwrap();
+        let output = test_support::run_child_while_lock_held(
+            "cli::commands::login::tests::cached_login_does_not_wait_for_the_refresh_lock",
+        );
         assert!(
             output.status.success(),
             "{} {}",
@@ -614,7 +585,6 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("\"Version\""));
-        drop(lock);
     }
 
     fn login_arguments() -> LoginArgs {
@@ -693,6 +663,17 @@ mod tests {
         );
         assert!(scope.load(&profile, 3600, true).unwrap().is_none());
         cache.clear().unwrap();
+    }
+
+    #[test]
+    fn role_pick_recheck_reuses_only_credentials_for_the_picked_role() {
+        let picked = "arn:aws:iam::123456789012:role/Picked";
+        assert!(reuse_after_role_pick(Some(picked), picked));
+        assert!(!reuse_after_role_pick(
+            Some("arn:aws:iam::123456789012:role/Other"),
+            picked
+        ));
+        assert!(!reuse_after_role_pick(None, picked));
     }
 
     #[test]

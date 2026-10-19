@@ -40,20 +40,24 @@ pub async fn execute(args: &Args) -> Result<()> {
     // without consent receive the explicit `unlock --allow-ai` guidance.
     crate::auth::lock::enforce(&args.profile, profile, true, false)?;
 
-    // Check only after taking the process lock so waiters see the credentials
-    // persisted by the previous holder before considering another browser.
-    // The guard is kept until the credentials have been written to stdout.
+    // Valid stored credentials need no lock, so they are returned without
+    // waiting behind another process's browser sign-in (#23).
     let profile_name = args.profile.as_str();
+    let session_duration = profile.azure.session_duration;
+    if let Some(creds) =
+        crate::auth::credentials::try_load_credentials(profile_name, session_duration, refresh)?
+    {
+        write_credentials_json(&creds)?;
+        return Ok(());
+    }
+
+    // On a miss, check again after taking the process lock so waiters see the
+    // credentials persisted by the previous holder before considering another
+    // browser. The guard is kept until the credentials are written to stdout.
     let quiet = args.quiet;
     let (credentials, _refresh_guard) = crate::auth::credentials::refresh_under_lock(
         profile_name,
-        || {
-            crate::auth::credentials::try_load_credentials(
-                profile_name,
-                profile.azure.session_duration,
-                refresh,
-            )
-        },
+        || crate::auth::credentials::try_load_credentials(profile_name, session_duration, refresh),
         move || async move {
             refresh_credentials(
                 profile_name,
@@ -147,4 +151,35 @@ async fn refresh_credentials(
     let outcome = perform_login(&params).await?;
     persist_credentials(&outcome.credentials, profile_name)?;
     Ok(outcome.credentials)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cached_credential_process_does_not_wait_for_the_refresh_lock() {
+        use crate::auth::credentials::refresh_lock::test_support;
+        use clap::Parser;
+        if let Ok(directory) = std::env::var(test_support::CHILD_DIRECTORY_ENV) {
+            test_support::prepare_cached_default_profile(&directory);
+            let arguments = ["awzars", "credential-process"];
+            execute(&Args::try_parse_from(arguments).unwrap())
+                .await
+                .unwrap();
+            return;
+        }
+        let output = test_support::run_child_while_lock_held(
+            "cli::commands::credential_process::tests::cached_credential_process_does_not_wait_for_the_refresh_lock",
+        );
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("\"Version\""), "{stdout}");
+        assert!(stdout.contains("cached-output"), "{stdout}");
+    }
 }

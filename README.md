@@ -409,7 +409,7 @@ For wrappers and shell scripts:
 | `2` | Config error (missing profile, malformed `config.toml`) |
 | `3` | Azure / SAML auth failure |
 | `4` | Browser or network failure |
-| `5` | AWS STS / keyring / cache failure |
+| `5` | AWS STS / keyring / cache failure, or the refresh-lock wait timed out |
 | `6` | TUI / dialog failure |
 | `7` | Profile is password-locked and not unlocked in this session |
 | `8` | AI agent context detected without consent |
@@ -469,11 +469,11 @@ separate: `aws_config_path` overrides its usual `~/.aws/config` location.
 
 `refresh-<profile>.lock` makes concurrent `login` and `credential-process`
 calls for the same profile refresh one at a time, so only one of them opens a
-browser. `login` prompts (remember-me, role selection) run outside the lock,
-and a `login` with valid cached credentials does not wait for it. A call that
+browser. Calls with valid cached credentials return without waiting for it,
+and `login` prompts (remember-me, role selection) run outside it. A call that
 must wait gives up after 60 seconds with a message saying another login or
-refresh is in progress; set `AWZARS_REFRESH_LOCK_TIMEOUT_SECS` to a positive whole number of
-seconds to change that limit. The lock file is never deleted.
+refresh is in progress; set `AWZARS_REFRESH_LOCK_TIMEOUT_SECS` to a positive
+whole number of seconds to change that limit. The lock file is never deleted.
 
 The directory has mode `0o700` and `config.toml` has mode `0o600` on Unix.
 Example `<config-dir>/config.toml`:

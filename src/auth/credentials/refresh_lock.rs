@@ -152,6 +152,81 @@ fn open_lock_file(path: &Path) -> std::io::Result<File> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    //! Runs a test's child process while this process holds a profile's
+    //! refresh lock, failing if the child is still blocked after a deadline.
+
+    use crate::config::{self, Config, Profile};
+    use crate::credential_process::protocol::CredentialProcessOutput;
+    use crate::storage::cache::CacheHandle;
+    use std::time::{Duration, Instant};
+
+    /// Env var naming the config directory a child should use.
+    pub(crate) const CHILD_DIRECTORY_ENV: &str = "AWZARS_LOCKED_REFRESH_DIRECTORY";
+
+    /// Child side: point the config at `directory` and give the `default`
+    /// profile valid credentials in the in-process cache.
+    pub(crate) fn prepare_cached_default_profile(directory: &str) {
+        config::set_config_dir_override(directory).unwrap();
+        let mut config = Config::default();
+        config.set_profile(
+            "default",
+            Profile {
+                lock_ai_markers: Some(vec![]),
+                ..Default::default()
+            },
+        );
+        config.save().unwrap();
+        CacheHandle::new("default")
+            .unwrap()
+            .store(&CredentialProcessOutput {
+                version: 1,
+                access_key_id: "cached-output".to_string(),
+                secret_access_key: "test-secret".to_string(),
+                session_token: Some("test-token".to_string()),
+                expiration: Some((chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339()),
+            })
+            .unwrap();
+    }
+
+    /// Parent side: hold `refresh-default.lock` the way a login waiting for
+    /// browser sign-in would, run the test `test_path` as a child, and return
+    /// its output. Panics if the child has not finished within 20 seconds.
+    pub(crate) fn run_child_while_lock_held(test_path: &str) -> std::process::Output {
+        let directory = tempfile::tempdir().unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(directory.path().join("refresh-default.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_path, "--nocapture"])
+            .env(CHILD_DIRECTORY_ENV, directory.path())
+            .env("AWZARS_REFRESH_LOCK_TIMEOUT_SECS", "600")
+            .env_remove("AWZARS_AZURE_TENANT_ID")
+            .env_remove("AWZARS_AZURE_APP_ID_URI")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                child.kill().unwrap();
+                panic!("{test_path}: a call with cached credentials waited on the refresh lock");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let output = child.wait_with_output().unwrap();
+        drop(lock);
+        output
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -256,6 +331,11 @@ mod tests {
         assert!(message.contains("profile 'work'"), "{message}");
         assert!(message.contains("waited 1s"), "{message}");
         assert!(message.contains("in progress"), "{message}");
+        assert!(
+            message.contains("AWZARS_REFRESH_LOCK_TIMEOUT_SECS"),
+            "{message}"
+        );
+        assert!(!message.contains("prompt"), "{message}");
         assert!(path.exists());
     }
 
