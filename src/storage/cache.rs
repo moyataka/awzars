@@ -34,12 +34,12 @@ impl CredentialCache {
             .insert(profile.to_string(), CachedCredential { credentials });
     }
 
-    /// Get valid credentials (not expired)
-    fn get(&self, profile: &str) -> Option<CredentialProcessOutput> {
+    /// Get valid credentials (outside the refresh window for `lifetime_secs`)
+    fn get(&self, profile: &str, lifetime_secs: i64) -> Option<CredentialProcessOutput> {
         let cached = self.credentials.get(profile)?;
 
         // Check expiration
-        if !cached.credentials.is_valid() {
+        if !cached.credentials.is_valid(lifetime_secs) {
             tracing::debug!("Cached credentials expired for profile: {}", profile);
             return None;
         }
@@ -83,13 +83,17 @@ impl CacheHandle {
         Ok(())
     }
 
-    /// Get valid credentials from cache
-    pub fn get_valid_credentials(&self) -> Result<Option<CredentialProcessOutput>> {
+    /// Get valid credentials from cache for a session configured to last
+    /// `lifetime_secs`.
+    pub fn get_valid_credentials(
+        &self,
+        lifetime_secs: i64,
+    ) -> Result<Option<CredentialProcessOutput>> {
         let cache = self
             .cache
             .lock()
             .map_err(|_| AwzarsError::Cache("Failed to lock cache".to_string()))?;
-        Ok(cache.get(&self.profile))
+        Ok(cache.get(&self.profile, lifetime_secs))
     }
 
     /// Clear cached credentials
