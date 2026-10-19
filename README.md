@@ -195,8 +195,9 @@ ldd target/x86_64-unknown-linux-musl/release/awzars
 
 ### 5. Quality gates run in CI
 
-CI runs these on Linux and macOS for every push and pull request to `dev`
-and `main`, plus a static musl build. Windows is not built in CI yet.
+CI runs these for every push and pull request to `dev` and `main` (and
+weekly): `cargo fmt` on Linux, clippy and tests on Linux and macOS, plus a
+static musl build and `cargo deny`. Windows is not built in CI yet.
 
 ```bash
 cargo fmt --check
