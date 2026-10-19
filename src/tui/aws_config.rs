@@ -13,8 +13,6 @@ use std::path::PathBuf;
 pub struct AwsProfileEntry {
     /// The AWS profile name (without the "profile " prefix)
     pub name: String,
-    /// Original section identity, retained while renaming a profile.
-    pub original_name: Option<String>,
     /// The region, if specified
     pub region: Option<String>,
     /// The credential_process command, if specified
@@ -39,10 +37,6 @@ impl AwsProfileEntry {
         self.source_profile.is_some()
     }
 
-    fn source_name(&self) -> &str {
-        self.original_name.as_deref().unwrap_or(&self.name)
-    }
-
     fn properties(&self) -> BTreeMap<String, String> {
         self.extra
             .iter()
@@ -63,6 +57,57 @@ impl AwsProfileEntry {
                 }),
             )
             .collect()
+    }
+}
+
+/// One TUI change, applied to the AWS config file as it is when saving.
+// Built once per save and only passed by reference, so the size difference
+// between variants costs nothing worth boxing for.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub enum AwsProfileOp {
+    /// Create (`before` is `None`), edit or rename (`after.name` differs from
+    /// `before.name`) a profile. Only the settings that differ between
+    /// `before` and `after` are written; every other setting keeps the value
+    /// currently in the file.
+    Upsert {
+        before: Option<AwsProfileEntry>,
+        after: AwsProfileEntry,
+    },
+    /// Remove the profile section with this name.
+    Delete { name: String },
+}
+
+/// Why an AWS config save did not write the file.
+#[derive(Debug)]
+pub enum SaveError {
+    /// Reading or writing the file failed.
+    Io(std::io::Error),
+    /// The profile being changed is no longer in the file.
+    Missing(String),
+    /// The new profile name is already used in the file.
+    Exists(String),
+}
+
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(f),
+            Self::Missing(name) => write!(
+                f,
+                "AWS profile '{}' changed outside the TUI; reloaded",
+                name
+            ),
+            Self::Exists(name) => write!(f, "AWS profile '{}' already exists", name),
+        }
+    }
+}
+
+impl std::error::Error for SaveError {}
+
+impl From<std::io::Error> for SaveError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
     }
 }
 
@@ -121,7 +166,9 @@ pub fn load_aws_integration(path_override: Option<&str>) -> AwsIntegrationData {
     }
 }
 
-/// Update profile settings while preserving other sections and unchanged text.
+/// Apply one profile change to the AWS config file as it is now, preserving
+/// other sections and unchanged text byte-for-byte. Returns the settings whose
+/// outside change was overridden by this one.
 ///
 /// `path_override` substitutes for the default `~/.aws/config` when set.
 ///
@@ -134,9 +181,9 @@ pub fn load_aws_integration(path_override: Option<&str>) -> AwsIntegrationData {
 /// renamed over the target. A crash mid-write leaves the previous AWS config
 /// intact rather than truncating it.
 pub fn save_aws_config(
-    profiles: &[AwsProfileEntry],
+    op: &AwsProfileOp,
     path_override: Option<&str>,
-) -> std::io::Result<()> {
+) -> Result<Vec<String>, SaveError> {
     let path = resolve_aws_config_path(path_override).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -157,7 +204,8 @@ pub fn save_aws_config(
                         "{} is a symlink; refusing to write through it",
                         parent.display()
                     ),
-                ));
+                )
+                .into());
             }
         }
         std::fs::create_dir_all(parent)?;
@@ -179,17 +227,19 @@ pub fn save_aws_config(
                     "{} is a symlink; refusing to write through it",
                     path.display()
                 ),
-            ));
+            )
+            .into());
         }
     }
 
     let contents = match std::fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
-    let output = document::Document::parse(&contents).update(profiles);
-    crate::util::atomic_write(&path, output.as_bytes(), 0o600)
+    let (output, overridden) = document::Document::parse(&contents).apply(op)?;
+    crate::util::atomic_write(&path, output.as_bytes(), 0o600)?;
+    Ok(overridden)
 }
 
 /// Resolve the effective AWS config path: override > default.
@@ -224,7 +274,6 @@ fn parse_aws_config(contents: &str) -> Vec<AwsProfileEntry> {
                 .and_then(|value| extract_awzars_profile(value));
             AwsProfileEntry {
                 name: name.to_string(),
-                original_name: Some(name.to_string()),
                 region: properties.remove("region"),
                 credential_process,
                 uses_awzars,
@@ -465,7 +514,6 @@ region = eu-west-1
         let profiles = vec![
             AwsProfileEntry {
                 name: "work".to_string(),
-                original_name: None,
                 region: Some("us-east-1".to_string()),
                 credential_process: Some("awzars credential-process --profile work".to_string()),
                 uses_awzars: true,
@@ -477,7 +525,6 @@ region = eu-west-1
             },
             AwsProfileEntry {
                 name: "other".to_string(),
-                original_name: None,
                 region: Some("us-west-2".to_string()),
                 credential_process: None,
                 uses_awzars: false,
@@ -495,7 +542,13 @@ region = eu-west-1
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config");
-        save_aws_config(&profiles, path.to_str()).unwrap();
+        for after in profiles {
+            let op = AwsProfileOp::Upsert {
+                before: None,
+                after,
+            };
+            assert!(save_aws_config(&op, path.to_str()).unwrap().is_empty());
+        }
         let reloaded = load_aws_integration(path.to_str()).all_profiles;
 
         assert_eq!(reloaded.len(), 2);

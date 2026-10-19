@@ -5,7 +5,6 @@ use crate::cli::args::{
     parse_app_id_uri, parse_profile_name, parse_role_arn, parse_session_duration, parse_tenant_uuid,
 };
 use crate::config::{AzureConfig, Profile};
-use std::collections::HashMap;
 
 /// A single editable form field
 #[derive(Debug, Clone)]
@@ -468,7 +467,9 @@ pub struct AwsProfileForm {
     pub original_name: Option<String>,
     /// Stored original values for cancel
     pub original_values: Vec<String>,
-    original_extra: HashMap<String, String>,
+    /// The entry this form was opened from; the save applies only the
+    /// difference from it.
+    original: Option<AwsProfileEntry>,
     /// Was this profile using awzars before editing?
     pub originally_uses_awzars: bool,
     /// Available awzars profile names for autocomplete
@@ -530,7 +531,7 @@ impl AwsProfileForm {
             focused: 0,
             original_name: Some(entry.name.clone()),
             original_values,
-            original_extra: entry.extra.clone(),
+            original: Some(entry.clone()),
             originally_uses_awzars: entry.uses_awzars,
             awzars_profiles,
             suggestions: Vec::new(),
@@ -561,7 +562,7 @@ impl AwsProfileForm {
             original_name: None,
             original_values,
             originally_uses_awzars: false,
-            original_extra: HashMap::new(),
+            original: None,
             awzars_profiles,
             suggestions: Vec::new(),
             suggestion_selected: 0,
@@ -874,6 +875,11 @@ impl AwsProfileForm {
         false
     }
 
+    /// The entry this form was opened from, or `None` when adding a profile.
+    pub fn original_entry(&self) -> Option<&AwsProfileEntry> {
+        self.original.as_ref()
+    }
+
     /// Convert form to an AwsProfileEntry. Returns Err with validation errors if invalid.
     pub fn to_entry(&self) -> Result<AwsProfileEntry, Vec<String>> {
         let errors = self.validate();
@@ -908,7 +914,11 @@ impl AwsProfileForm {
             .as_ref()
             .and_then(|c| super::aws_config::extract_awzars_profile(c));
 
-        let mut extra = self.original_extra.clone();
+        let mut extra = self
+            .original
+            .as_ref()
+            .map(|entry| entry.extra.clone())
+            .unwrap_or_default();
         if !output_val.is_empty() {
             extra.insert("output".to_string(), output_val);
         } else {
@@ -917,7 +927,6 @@ impl AwsProfileForm {
 
         Ok(AwsProfileEntry {
             name,
-            original_name: self.original_name.clone(),
             region: if region_val.is_empty() {
                 None
             } else {

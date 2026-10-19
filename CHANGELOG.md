@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Browser: SAML is captured before console submission (#8); remembered sessions are reused and renewed on local logins (#13).
 - Credentials: refreshes are serialized across processes (#11) and happen before the SDK's advisory window (#12).
 - TUI: no panic when editing non-ASCII text (#7).
+- TUI: saving an AWS profile applies only that change to the current ~/.aws/config, keeping profiles and settings edited elsewhere while the TUI is open (#24).
 - CLI: `-q/--quiet` is honoured (#17); inline AI consent requires an interactive stderr (#14).
 - Docs: per-platform configuration paths (#19).
 
