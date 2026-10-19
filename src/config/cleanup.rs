@@ -63,24 +63,28 @@ pub fn delete_awzars_profile(name: &str) -> Result<ProfileDeletionReport> {
         warnings.push(format!("cache: {}", e));
     }
 
-    // Drop any session unlock/consent token for this profile. Best-effort:
-    // the verifier is already gone (with the profile entry), so an orphaned
-    // token would be inert — but we clean it up so `lock::gc_stale_unlocks`
-    // does not have to.
-    if let Err(e) = crate::auth::lock::remove_unlock(name) {
-        warnings.push(format!("session unlock token: {}", e));
+    // Drop the profile's session unlock/consent tokens and failed-attempt
+    // counters in every session scope, so a profile later created under the
+    // same name starts with none. Best-effort: a token minted under a
+    // password lock stays bound to that lock's verifier even if left behind.
+    if let Err(e) = crate::auth::lock::revoke_all_unlocks(name) {
+        warnings.push(format!("session unlock tokens: {}", e));
     }
 
-    let orphaned_aws_profiles = aws_config::load_aws_integration(None)
-        .for_awzars_profile(name)
-        .iter()
-        .map(|p| p.name.clone())
-        .collect();
+    let orphaned_aws_profiles = linked_aws_profiles(&config, name);
 
     Ok(ProfileDeletionReport {
         orphaned_aws_profiles,
         warnings,
     })
+}
+
+fn linked_aws_profiles(config: &super::Config, name: &str) -> Vec<String> {
+    aws_config::load_aws_integration(config.aws_config_path.as_deref())
+        .for_awzars_profile(name)
+        .iter()
+        .map(|profile| profile.name.clone())
+        .collect()
 }
 
 /// Wipe cached and persisted STS credentials for a profile while leaving the
@@ -122,6 +126,20 @@ pub fn credential_identity_changed(prev: &Profile, next: &Profile) -> bool {
 mod tests {
     use super::*;
     use crate::config::AzureConfig;
+
+    #[test]
+    fn orphan_scan_uses_the_configured_aws_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom-aws-config");
+        std::fs::write(&path, "[profile work]\ncredential_process = /usr/bin/awzars credential-process --profile deleted\n[profile other]\ncredential_process = /usr/bin/awzars credential-process --profile retained\n").unwrap();
+        let config = super::super::Config {
+            aws_config_path: Some(path.to_string_lossy().into()),
+            ..Default::default()
+        };
+        assert_eq!(linked_aws_profiles(&config, "deleted"), ["work"]);
+        assert_eq!(linked_aws_profiles(&config, "retained"), ["other"]);
+        assert!(linked_aws_profiles(&config, "absent").is_empty());
+    }
 
     fn profile_with(tenant: &str, app: &str, role: Option<&str>) -> Profile {
         Profile {
@@ -191,12 +209,15 @@ mod tests {
             );
         let handle = CacheHandle::new(profile).expect("cache handle");
         handle.store(&creds).expect("cache store");
-        assert!(handle.get_valid_credentials().expect("cache get").is_some());
+        assert!(handle
+            .get_valid_credentials(3600)
+            .expect("cache get")
+            .is_some());
 
         let _warnings = invalidate_cached_credentials(profile);
 
         assert!(handle
-            .get_valid_credentials()
+            .get_valid_credentials(3600)
             .expect("cache get after invalidate")
             .is_none());
     }

@@ -26,7 +26,7 @@ pub struct Args {
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Suppress output
+    /// Suppress informational output and logs below error (preserves JSON and prompts)
     #[arg(short, long, global = true)]
     pub quiet: bool,
 
@@ -43,20 +43,20 @@ pub enum Command {
     /// Login to Azure AD and obtain AWS credentials
     Login {
         /// Azure AD tenant ID (overrides profile config)
-        #[arg(long, env = "AZURE_TENANT_ID", value_parser = parse_tenant_uuid)]
+        #[arg(long, env = "AWZARS_AZURE_TENANT_ID", value_parser = parse_tenant_uuid)]
         azure_tenant: Option<String>,
 
         /// Azure AD app ID URI (overrides profile config)
-        #[arg(long, env = "AZURE_APP_ID_URI", value_parser = parse_app_id_uri)]
+        #[arg(long, env = "AWZARS_AZURE_APP_ID_URI", value_parser = parse_app_id_uri)]
         azure_app: Option<String>,
 
         /// AWS role ARN to assume (overrides profile config)
         #[arg(long, value_parser = parse_role_arn)]
         role_arn: Option<String>,
 
-        /// Session duration in seconds (900..=43200)
-        #[arg(long, default_value = "3600", value_parser = parse_session_duration)]
-        session_duration: i32,
+        /// Session duration in seconds (900..=43200; defaults to profile setting)
+        #[arg(long, value_parser = parse_session_duration)]
+        session_duration: Option<i32>,
 
         /// Run browser in headless mode
         #[arg(long)]
@@ -100,11 +100,11 @@ pub enum Command {
     /// Configure a new profile
     Configure {
         /// Azure AD tenant ID
-        #[arg(long, env = "AZURE_TENANT_ID", value_parser = parse_tenant_uuid)]
+        #[arg(long, env = "AWZARS_AZURE_TENANT_ID", value_parser = parse_tenant_uuid)]
         azure_tenant: Option<String>,
 
         /// Azure AD app ID URI
-        #[arg(long, env = "AZURE_APP_ID_URI", value_parser = parse_app_id_uri)]
+        #[arg(long, env = "AWZARS_AZURE_APP_ID_URI", value_parser = parse_app_id_uri)]
         azure_app: Option<String>,
 
         /// Default AWS role ARN
@@ -225,7 +225,7 @@ pub struct LoginArgs {
     pub azure_tenant: Option<String>,
     pub azure_app: Option<String>,
     pub role_arn: Option<String>,
-    pub session_duration: i32,
+    pub session_duration: Option<i32>,
     pub headless: bool,
     pub no_sandbox: bool,
     pub force_refresh: bool,
@@ -238,6 +238,14 @@ pub struct LoginArgs {
 }
 
 impl LoginArgs {
+    pub fn resolved_session_duration(&self, azure: &crate::config::AzureConfig) -> i32 {
+        self.session_duration.unwrap_or(azure.session_duration)
+    }
+
+    pub fn refresh_requested(&self) -> bool {
+        self.force_refresh || self.session_duration.is_some()
+    }
+
     pub fn from_command(cmd: &Command) -> Option<Self> {
         match cmd {
             Command::Login {
@@ -315,17 +323,16 @@ pub fn parse_session_duration(s: &str) -> Result<i32, String> {
     Ok(v)
 }
 
-/// Validate an IAM role ARN: `arn:aws:iam::<12-digit-account>:role/<name>`.
+/// Validate an IAM role ARN in the AWS, China, or GovCloud partition.
 pub fn parse_role_arn(s: &str) -> Result<String, String> {
-    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(r"^arn:aws:iam::\d{12}:role/.+$")
-            .expect("role-ARN regex must compile — programmer error")
-    });
-    if RE.is_match(s) {
-        Ok(s.to_string())
-    } else {
-        Err("invalid IAM role ARN (expected arn:aws:iam::<account>:role/<name>)".to_string())
-    }
+    use crate::auth::aws::arn::{IamArn, IamResource};
+    IamArn::parse(s)
+        .filter(|arn| arn.resource() == IamResource::Role)
+        .map(|arn| arn.as_str().to_string())
+        .ok_or_else(|| {
+            "invalid IAM role ARN (expected arn:<partition>:iam::<12-digit-account>:role/<name>)"
+                .to_string()
+        })
 }
 
 /// AWS profile names are restricted to a safe alphanumeric subset.
@@ -410,6 +417,80 @@ pub fn parse_app_id_uri(s: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn azure_environment_is_namespaced() {
+        const TENANT: &str = "11111111-2222-3333-4444-555555555555";
+        const APPLICATION: &str = "https://signin.aws.amazon.com/saml";
+        if let Ok(case) = std::env::var("AWZARS_ENVIRONMENT_TEST") {
+            for command in ["login", "configure"] {
+                let arguments = Args::try_parse_from(["awzars", command]).unwrap();
+                let (tenant, application) = match arguments.command {
+                    Command::Login {
+                        azure_tenant,
+                        azure_app,
+                        ..
+                    }
+                    | Command::Configure {
+                        azure_tenant,
+                        azure_app,
+                        ..
+                    } => (azure_tenant, azure_app),
+                    _ => unreachable!(),
+                };
+                if case == "namespaced" {
+                    assert_eq!(tenant.as_deref(), Some(TENANT));
+                    assert_eq!(application.as_deref(), Some(APPLICATION));
+                } else {
+                    assert!(tenant.is_none());
+                    assert!(application.is_none());
+                }
+            }
+            return;
+        }
+        for case in ["common", "namespaced"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "cli::args::tests::azure_environment_is_namespaced",
+                ])
+                .env("AWZARS_ENVIRONMENT_TEST", case)
+                .env("AZURE_TENANT_ID", "unrelated-azure-sdk-value")
+                .env("AZURE_APP_ID_URI", "unrelated-azure-sdk-value")
+                .env_remove("AWZARS_AZURE_TENANT_ID")
+                .env_remove("AWZARS_AZURE_APP_ID_URI");
+            if case == "namespaced" {
+                child
+                    .env("AWZARS_AZURE_TENANT_ID", TENANT)
+                    .env("AWZARS_AZURE_APP_ID_URI", APPLICATION);
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+
+    #[test]
+    fn login_duration_uses_cli_then_profile_then_default() {
+        let mut azure = crate::config::AzureConfig::default();
+        let arguments = Args::try_parse_from(["awzars", "login"]).unwrap();
+        let login = LoginArgs::from_command(&arguments.command).unwrap();
+        assert_eq!(login.session_duration, None);
+        assert_eq!(login.resolved_session_duration(&azure), 3600);
+        assert!(!login.refresh_requested());
+        azure.session_duration = 43200;
+        assert_eq!(login.resolved_session_duration(&azure), 43200);
+
+        let arguments =
+            Args::try_parse_from(["awzars", "login", "--session-duration", "7200"]).unwrap();
+        let login = LoginArgs::from_command(&arguments.command).unwrap();
+        assert_eq!(login.resolved_session_duration(&azure), 7200);
+        assert!(login.refresh_requested());
+    }
 
     #[test]
     fn test_parse_session_duration_valid() {

@@ -28,7 +28,7 @@ fn sanitize_aws_error_code(code: &str) -> String {
 
 /// Normalize a user-supplied region: trim surrounding whitespace and treat a
 /// blank value as "unset" so a hand-edited `region = ""` in
-/// `~/.awzars/config.toml` never becomes an empty, invalid region.
+/// the configured `config.toml` never becomes an empty, invalid region.
 fn sanitize_region(region: Option<String>) -> Option<Region> {
     region
         .map(|r| r.trim().to_string())
@@ -39,7 +39,7 @@ fn sanitize_region(region: Option<String>) -> Option<Region> {
 /// Region provider for the STS endpoint, in precedence order:
 ///
 /// 1. the awzars profile's `region` (so a region set only in
-///    `~/.awzars/config.toml` is honoured — it was previously ignored),
+///    the configured `config.toml` is honoured — it was previously ignored),
 /// 2. the standard AWS default chain (`AWS_REGION` / `AWS_DEFAULT_REGION`,
 ///    `~/.aws/config`, IMDS),
 /// 3. a `us-east-1` fallback so `AssumeRoleWithSAML` never fails purely for

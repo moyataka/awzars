@@ -74,11 +74,13 @@ pub async fn execute(args: &Args) -> Result<()> {
 
     if identity_changed {
         for warning in crate::config::cleanup::invalidate_cached_credentials(&args.profile) {
-            eprintln!("warning: credential cache cleanup: {}", warning);
+            tracing::warn!("credential cache cleanup: {}", warning);
         }
     }
 
-    println!("Profile '{}' configured successfully", args.profile);
+    if !args.quiet {
+        println!("Profile '{}' configured successfully", args.profile);
+    }
 
     // Add-time only, and only when a real terminal is attached so non-interactive
     // callers (CI, scripts) are never blocked on a prompt.
@@ -93,7 +95,7 @@ pub async fn execute(args: &Args) -> Result<()> {
             .interact()
             .map_err(|e| AwzarsError::Dialog(e.to_string()))?;
         if want_lock {
-            crate::cli::commands::set_password::run(&args.profile, false)?;
+            crate::cli::commands::set_password::run(&args.profile, false, args.quiet)?;
         }
     }
 

@@ -78,7 +78,7 @@ impl FormField {
             }
             FieldOp::DeleteBack => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                    self.cursor_pos = self.previous_character_boundary();
                     self.value.remove(self.cursor_pos);
                 }
             }
@@ -88,13 +88,11 @@ impl FormField {
                 }
             }
             FieldOp::MoveLeft => {
-                if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
-                }
+                self.cursor_pos = self.previous_character_boundary();
             }
             FieldOp::MoveRight => {
-                if self.cursor_pos < self.value.len() {
-                    self.cursor_pos += 1;
+                if let Some(character) = self.value[self.cursor_pos..].chars().next() {
+                    self.cursor_pos += character.len_utf8();
                 }
             }
             FieldOp::MoveHome => {
@@ -108,6 +106,14 @@ impl FormField {
                 self.cursor_pos = 0;
             }
         }
+    }
+
+    fn previous_character_boundary(&self) -> usize {
+        self.value[..self.cursor_pos]
+            .char_indices()
+            .next_back()
+            .map(|(offset, _)| offset)
+            .unwrap_or(0)
     }
 }
 
@@ -135,6 +141,50 @@ mod tests {
         f.apply(FieldOp::InsertChar('é'));
         assert_eq!(f.value, "é");
         assert_eq!(f.cursor_pos, 'é'.len_utf8());
+    }
+
+    #[test]
+    fn multibyte_editing_keeps_cursor_on_character_boundaries() {
+        for character in ['é', 'ก', '🙂', '\u{301}'] {
+            let mut field = field("", 0);
+            field.apply(FieldOp::InsertChar(character));
+            field.apply(FieldOp::InsertChar('z'));
+            field.apply(FieldOp::MoveLeft);
+            assert_eq!(field.cursor_pos, character.len_utf8());
+            field.apply(FieldOp::DeleteBack);
+            assert_eq!(field.value, "z");
+            assert_eq!(field.cursor_pos, 0);
+            field.apply(FieldOp::InsertChar(character));
+            field.apply(FieldOp::MoveHome);
+            field.apply(FieldOp::DeleteForward);
+            assert_eq!(field.value, "z");
+            assert_eq!(field.cursor_pos, 0);
+        }
+    }
+
+    #[test]
+    fn cursor_walks_both_directions_through_mixed_utf8() {
+        let text = "aéก🙂z";
+        let boundaries: Vec<_> = text
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain(std::iter::once(text.len()))
+            .collect();
+        let mut field = field(text, 0);
+        for expected in boundaries.iter().skip(1) {
+            field.apply(FieldOp::MoveRight);
+            assert_eq!(field.cursor_pos, *expected);
+        }
+        for expected in boundaries.iter().rev().skip(1) {
+            field.apply(FieldOp::MoveLeft);
+            assert_eq!(field.cursor_pos, *expected);
+        }
+        field.apply(FieldOp::MoveEnd);
+        while !field.value.is_empty() {
+            field.apply(FieldOp::DeleteBack);
+            assert!(field.value.is_char_boundary(field.cursor_pos));
+        }
+        assert_eq!(field.cursor_pos, 0);
     }
 
     #[test]

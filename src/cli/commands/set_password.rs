@@ -6,7 +6,7 @@ use crate::error::{AwzarsError, Result};
 use std::io::IsTerminal;
 use zeroize::Zeroizing;
 
-pub fn run(profile_name: &str, remove: bool) -> Result<()> {
+pub fn run(profile_name: &str, remove: bool, quiet: bool) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         return Err(AwzarsError::LockRequiresTty);
     }
@@ -31,7 +31,9 @@ pub fn run(profile_name: &str, remove: bool) -> Result<()> {
             );
             lock::verify_password_or_fail(&old, &phc, profile_name)?;
         } else if remove {
-            println!("Profile '{}' is not password-locked.", profile_name);
+            if !quiet {
+                println!("Profile '{}' is not password-locked.", profile_name);
+            }
             return Ok(());
         }
     }
@@ -42,8 +44,10 @@ pub fn run(profile_name: &str, remove: bool) -> Result<()> {
         profile.lock_ttl_hours = None;
         profile.lock_ai_markers = None;
         config.save()?;
-        let _ = lock::remove_unlock(profile_name);
-        println!("Password lock removed from profile '{}'.", profile_name);
+        revoke_session_tokens(profile_name);
+        if !quiet {
+            println!("Password lock removed from profile '{}'.", profile_name);
+        }
         return Ok(());
     }
 
@@ -64,14 +68,30 @@ pub fn run(profile_name: &str, remove: bool) -> Result<()> {
     profile.lock_verifier = Some(phc);
     config.save()?;
 
-    // Changing the password invalidates any existing session token: callers
-    // must re-unlock with the new secret.
-    let _ = lock::remove_unlock(profile_name);
+    // Setting or changing the password ends every session's unlock: tokens
+    // are bound to the previous verifier, and are also removed in every
+    // session scope here. Callers must re-unlock with the new secret.
+    revoke_session_tokens(profile_name);
 
-    println!(
-        "Password lock set on profile '{}'. Run `awzars --profile {} unlock` \
-         in any terminal session before using credentials there.",
-        profile_name, profile_name
-    );
+    if !quiet {
+        println!(
+            "Password lock set on profile '{}'. Run `awzars --profile {} unlock` \
+             in any terminal session before using credentials there.",
+            profile_name, profile_name
+        );
+    }
     Ok(())
+}
+
+/// Best-effort removal of the profile's session tokens in every scope. A
+/// failure is logged rather than returned: the lock change is already saved,
+/// and the old tokens no longer match the profile's verifier.
+fn revoke_session_tokens(profile_name: &str) {
+    if let Err(e) = lock::revoke_all_unlocks(profile_name) {
+        tracing::warn!(
+            profile = profile_name,
+            error = %e,
+            "could not remove every session unlock token"
+        );
+    }
 }

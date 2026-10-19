@@ -20,24 +20,29 @@ use crate::storage::keyring::KeyringStorage;
 /// subsequent calls in the same process skip the keyring round trip (and
 /// on macOS, skip the Keychain authorization dialog).
 ///
+/// `session_duration` is the profile's configured session length in seconds;
+/// it sets the refresh window (see `protocol::is_fresh`).
+///
 /// `force_refresh = true` short-circuits to `Ok(None)` regardless of
 /// what's stored. Use it for `--force-refresh` style flags.
 pub fn try_load_credentials(
     profile: &str,
+    session_duration: i32,
     force_refresh: bool,
 ) -> Result<Option<CredentialProcessOutput>> {
+    let lifetime_secs = i64::from(session_duration);
     if force_refresh {
         return Ok(None);
     }
 
     let cache = CacheHandle::new(profile)?;
-    if let Some(creds) = cache.get_valid_credentials()? {
+    if let Some(creds) = cache.get_valid_credentials(lifetime_secs)? {
         return Ok(Some(creds));
     }
 
     let keyring = KeyringStorage::new(profile)?;
     if let Some(creds) = keyring.get_credentials()? {
-        if creds.is_valid() {
+        if creds.is_valid(lifetime_secs) {
             let output = CredentialProcessOutput::from(creds);
             cache.store(&output)?;
             return Ok(Some(output));

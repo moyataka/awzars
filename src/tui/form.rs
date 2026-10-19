@@ -5,7 +5,6 @@ use crate::cli::args::{
     parse_app_id_uri, parse_profile_name, parse_role_arn, parse_session_duration, parse_tenant_uuid,
 };
 use crate::config::{AzureConfig, Profile};
-use std::collections::HashMap;
 
 /// A single editable form field
 #[derive(Debug, Clone)]
@@ -74,7 +73,7 @@ pub struct ProfileForm {
     pub focused: usize,
     /// Which toggle is focused (None = text field focused)
     pub toggle_focused: Option<usize>,
-    /// Original profile name being edited (for rename detection)
+    /// Original profile name; existing awzars profile names are immutable.
     pub original_name: Option<String>,
     /// Stored original values for cancel
     pub original_values: Vec<String>,
@@ -99,7 +98,7 @@ impl ProfileForm {
     /// Create a form pre-populated from an existing profile
     pub fn from_profile(name: &str, profile: &Profile) -> Self {
         let fields = vec![
-            FormField::new("Profile Name", name.to_string(), false),
+            FormField::new("Name (read-only)", name.to_string(), false),
             FormField::new("Tenant ID", profile.azure.tenant_id.clone(), false),
             FormField::new("App ID URI", profile.azure.app_id_uri.clone(), false),
             FormField::new(
@@ -125,7 +124,7 @@ impl ProfileForm {
         Self {
             fields,
             toggles,
-            focused: 0,
+            focused: IDX_TENANT,
             toggle_focused: None,
             original_name: Some(name.to_string()),
             original_values,
@@ -139,9 +138,11 @@ impl ProfileForm {
     /// creating a new profile (empty name, no original_name).
     pub fn clone_from(source_name: &str, profile: &Profile) -> Self {
         let mut form = Self::from_profile(source_name, profile);
+        form.fields[IDX_NAME].label = "Profile Name";
         form.fields[IDX_NAME].value.clear();
         form.fields[IDX_NAME].cursor_pos = 0;
         form.original_name = None;
+        form.focused = IDX_NAME;
         form.original_values[IDX_NAME] = String::new();
         form
     }
@@ -269,7 +270,9 @@ impl ProfileForm {
 
     /// Get the currently focused field mutably
     pub fn focused_field_mut(&mut self) -> Option<&mut FormField> {
-        if self.toggle_focused.is_some() {
+        if self.toggle_focused.is_some()
+            || (self.focused == IDX_NAME && self.original_name.is_some())
+        {
             None
         } else {
             self.fields.get_mut(self.focused)
@@ -309,6 +312,13 @@ impl ProfileForm {
         // Profile name
         if let Err(e) = parse_profile_name(&self.fields[IDX_NAME].value) {
             errors.push(format!("Profile Name: {}", e));
+        }
+        if self
+            .original_name
+            .as_ref()
+            .is_some_and(|name| name != &self.fields[IDX_NAME].value)
+        {
+            errors.push("Existing awzars profiles cannot be renamed; clone to a new name and update AWS links before deleting the old profile".into());
         }
 
         // Tenant ID
@@ -457,6 +467,9 @@ pub struct AwsProfileForm {
     pub original_name: Option<String>,
     /// Stored original values for cancel
     pub original_values: Vec<String>,
+    /// The entry this form was opened from; the save applies only the
+    /// difference from it.
+    original: Option<AwsProfileEntry>,
     /// Was this profile using awzars before editing?
     pub originally_uses_awzars: bool,
     /// Available awzars profile names for autocomplete
@@ -518,6 +531,7 @@ impl AwsProfileForm {
             focused: 0,
             original_name: Some(entry.name.clone()),
             original_values,
+            original: Some(entry.clone()),
             originally_uses_awzars: entry.uses_awzars,
             awzars_profiles,
             suggestions: Vec::new(),
@@ -548,6 +562,7 @@ impl AwsProfileForm {
             original_name: None,
             original_values,
             originally_uses_awzars: false,
+            original: None,
             awzars_profiles,
             suggestions: Vec::new(),
             suggestion_selected: 0,
@@ -860,6 +875,11 @@ impl AwsProfileForm {
         false
     }
 
+    /// The entry this form was opened from, or `None` when adding a profile.
+    pub fn original_entry(&self) -> Option<&AwsProfileEntry> {
+        self.original.as_ref()
+    }
+
     /// Convert form to an AwsProfileEntry. Returns Err with validation errors if invalid.
     pub fn to_entry(&self) -> Result<AwsProfileEntry, Vec<String>> {
         let errors = self.validate();
@@ -894,9 +914,15 @@ impl AwsProfileForm {
             .as_ref()
             .and_then(|c| super::aws_config::extract_awzars_profile(c));
 
-        let mut extra = HashMap::new();
+        let mut extra = self
+            .original
+            .as_ref()
+            .map(|entry| entry.extra.clone())
+            .unwrap_or_default();
         if !output_val.is_empty() {
             extra.insert("output".to_string(), output_val);
+        } else {
+            extra.remove("output");
         }
 
         Ok(AwsProfileEntry {

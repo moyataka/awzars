@@ -171,7 +171,7 @@ Clear-cache options: `--yes` (skip confirmation prompt).
 
 Delete-profile options: `--yes` (skip confirmation prompt). Cleans up the awzars config entry, keyring credentials (incl. cookie key), in-memory cache, and the per-profile chromium dir. **Does not** modify `~/.aws/config` — AWS profiles still pointing at the deleted awzars profile are listed as a warning so they can be edited by hand.
 
-Set-password options: `--remove` (clear the lock; still requires the old password). TTY-only; refuses if stdin is not a terminal so passwords can never be piped in. Argon2id PHC string lives in `~/.awzars/config.toml` under the profile entry. No minimum password length is enforced — typing speed is prioritized, with the dialoguer confirmation step (entered twice) as the only safety net against typos.
+Set-password options: `--remove` (clear the lock; still requires the old password). TTY-only; refuses if stdin is not a terminal so passwords can never be piped in. Argon2id PHC string lives in `<config-dir>/config.toml` under the profile entry. No minimum password length is enforced — typing speed is prioritized, with the dialoguer confirmation step (entered twice) as the only safety net against typos.
 
 Unlock options: `--allow-ai` (permit AI agents in this session — `CLAUDECODE` / `AI_AGENT` env markers — to use the credentials), `--ttl-hours <N>` (override the default 8h; soft-capped at 24h, raise to the 720h / 30-day hard cap with `--allow-long-ttl`), `--allow-long-ttl` (opt-in for `--ttl-hours > 24`), `--no-expire` (skip time expiry — token lives as long as the session does, dies on logout; conflicts with `--ttl-hours` / `--allow-long-ttl`). Password-locked profiles require a TTY and prompt for the password. Unlocked profiles only need `--allow-ai` — TTY not required, so it can be invoked through Claude Code's Bash tool. See `SECURITY_AUDIT.md` for the tradeoff.
 
@@ -222,9 +222,9 @@ Schema additions on `Profile` (all `Option<_>`, omitted when unset): `lock_verif
 
 ## Security
 
-- Config dir (`~/.awzars/`) permissions enforced to 0o700 (Unix) on every access — mitigates TOCTOU where adversary pre-creates dir with loose perms
+- Config dir (`<config-dir>/`) permissions enforced to 0o700 (Unix) on every access — mitigates TOCTOU where adversary pre-creates dir with loose perms
 - Config files written with mode 0o600 (Unix); `config.toml` size capped at 1 MiB on load to prevent OOM from a hostile or corrupted file
-- Chromium data dir (`~/.awzars/chromium/<profile>/`) permissions enforced to 0o700
+- Chromium data dir (`<config-dir>/chromium/<profile>/`) permissions enforced to 0o700
 - Cookie store (`cookies.enc`) written with mode 0o600 — ChaCha20-Poly1305 AEAD with random nonce per encryption; format `[1 byte key_id][12 byte nonce][ciphertext+tag]`
 - Cookie key rotation: 30-day rotation window, 90-day retention. Keystore is one OS-keyring item per profile (`{profile}:cookie_key`) holding a JSON `{current, keys, created_at}` blob — single keyring item means macOS Keychain ACL is granted once and rotation never re-prompts. Legacy single-key entries auto-migrate on first read.
 - All atomic on-disk writes go through `util::atomic_write`, which (Unix) opens the temp file with `O_CREAT | O_EXCL | O_NOFOLLOW` after first unlinking any stale `<path>.tmp`, then `fchmod`s the open fd to the requested mode. This defeats same-UID symlink-planting on every persisted secret (`config.toml`, `cookies.enc`, unlock tokens, failure counters, `~/.aws/config`).
@@ -242,18 +242,18 @@ Schema additions on `Profile` (all `Option<_>`, omitted when unset): `lock_verif
 - Ephemeral `--user-data-dir` with `tempfile::TempDir` auto-cleanup (non-remember-me sessions)
 - SAML client-side validation: issuer (URL-normalized), audience, Recipient, time window (30s skew), inverted-time-window rejection. **No XML-DSIG verification client-side** — integrity is delegated to TLS-to-Azure plus AWS STS re-verification in `AssumeRoleWithSAML`.
 - Error messages redacted to avoid leaking tenant IDs, issuer URLs, or Recipient values
-- 100% safe Rust (no `unsafe` blocks)
+- Safe Rust except for small, `SAFETY`-commented macOS FFI calls in `auth/lock.rs` (`proc_pidinfo`, `sysctlbyname`)
 - CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `clippy -D warnings`, tests, `cargo deny check`, `cargo audit` on every PR
 
 ## Configuration
 
-Stored in `~/.awzars/config.toml`. Top-level field `aws_config_path` (optional string) overrides the default `~/.aws/config` path used by the TUI. Chromium persistent sessions (from `--remember-me`) stored in `~/.awzars/chromium/<profile>/`.
+Stored in `<config-dir>/config.toml`. `<config-dir>` is `$XDG_CONFIG_HOME/awzars` (or `~/.config/awzars`) on Linux, `~/Library/Application Support/com.awzars.awzars` on macOS, and `%APPDATA%\awzars\awzars\config` on Windows. An absolute `--config-dir` overrides `AWZARS_CONFIG_DIR`, which overrides these defaults. Top-level field `aws_config_path` (optional string) overrides the default `~/.aws/config` path used by the TUI and deletion orphan scan. Chromium persistent sessions (from `--remember-me`) are stored in `<config-dir>/chromium/<profile>/`.
 
-**AWS region for STS**: the per-profile `region` field is the region used for the `AssumeRoleWithSAML` call. Resolution precedence (`auth::aws::sts::build_region_provider`): profile `region` → AWS default chain (`AWS_REGION` / `AWS_DEFAULT_REGION`, `~/.aws/config`, IMDS) → `us-east-1` fallback. So a region set only in `~/.awzars/config.toml` is honored (it was previously parsed/stored but ignored by STS), and the call never fails purely for lack of a configured region. The profile `region` takes precedence over the `AWS_REGION` env var because it is an explicit awzars-profile setting; blank/whitespace values are treated as unset.
+**AWS region for STS**: the per-profile `region` field is the region used for the `AssumeRoleWithSAML` call. Resolution precedence (`auth::aws::sts::build_region_provider`): profile `region` → AWS default chain (`AWS_REGION` / `AWS_DEFAULT_REGION`, `~/.aws/config`, IMDS) → `us-east-1` fallback. So a region set only in `<config-dir>/config.toml` is honored (it was previously parsed/stored but ignored by STS), and the call never fails purely for lack of a configured region. The profile `region` takes precedence over the `AWS_REGION` env var because it is an explicit awzars-profile setting; blank/whitespace values are treated as unset.
 
 ## Cookie Store (Remote → Local Session Transfer)
 
-When authenticating via remote Chrome (`CHROME_REMOTE_URL`) with `--remember-me`, session cookies are extracted and saved locally to `~/.awzars/chromium/<profile>/cookies.enc` (mode 0o600, ChaCha20-Poly1305 encrypted). This enables subsequent `credential-process` calls to silently re-authenticate using **local** headless Chrome — no remote Chrome needed after the initial login.
+When authenticating via remote Chrome (`CHROME_REMOTE_URL`) with `--remember-me`, session cookies are extracted and saved locally to `<config-dir>/chromium/<profile>/cookies.enc` (mode 0o600, ChaCha20-Poly1305 encrypted). This enables subsequent `credential-process` calls to silently re-authenticate using **local** headless Chrome — no remote Chrome needed after the initial login.
 
 Flow:
 1. `CHROME_REMOTE_URL=ws://... awzars login --remember-me` → authenticate via remote Chrome, cookies saved locally
@@ -354,7 +354,7 @@ awzars login
 
 | Tab | Content |
 |-----|---------|
-| **Tab 1: awzars** | Profiles from `~/.awzars/config.toml` — full CRUD |
+| **Tab 1: awzars** | Profiles from `<config-dir>/config.toml` — full CRUD |
 | **Tab 2: AWS Config** | All profiles from `~/.aws/config` — full CRUD for awzars-linked, edit-only for others |
 
 ### AWS Config Profile Types

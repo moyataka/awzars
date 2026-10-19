@@ -11,6 +11,27 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::Result;
 
+// Match botocore's advisory refresh window so a refresh does not return the
+// same credentials that caused the SDK to call us in the first place. Applies
+// to sessions of 30 minutes or more; see `refresh_buffer` for shorter ones.
+const REFRESH_BUFFER: chrono::Duration = chrono::Duration::minutes(15);
+
+/// Refresh window for credentials minted with a `lifetime_secs` session:
+/// the SDK's 15-minute advisory window, shrunk to half the lifetime for
+/// sessions under 30 minutes. Such sessions are minted inside the advisory
+/// window, so this deliberately serves cached credentials while the SDK is
+/// already asking for a refresh; otherwise every call would re-run the browser
+/// login. A non-positive lifetime yields a zero buffer (serve until expiry).
+fn refresh_buffer(lifetime_secs: i64) -> chrono::Duration {
+    REFRESH_BUFFER.min(chrono::Duration::seconds(lifetime_secs.max(0) / 2))
+}
+
+/// Whether credentials expiring at `expiration` may still be served at `now`
+/// for a session configured to last `lifetime_secs`.
+pub fn is_fresh(expiration: DateTime<Utc>, now: DateTime<Utc>, lifetime_secs: i64) -> bool {
+    now + refresh_buffer(lifetime_secs) < expiration
+}
+
 // SECURITY: `CredentialProcessOutput` and `Credentials` hold AWS secrets in
 // plain `String` fields because the credential_process protocol mandates
 // `Serialize`/`Deserialize` to/from JSON, and `zeroize::Zeroizing<String>` is
@@ -73,13 +94,12 @@ impl CredentialProcessOutput {
         self
     }
 
-    /// Check if credentials are still valid (with 5 minute buffer)
-    pub fn is_valid(&self) -> bool {
+    /// Whether cached credentials are outside the refresh window for a
+    /// session configured to last `lifetime_secs` (see [`is_fresh`]).
+    pub fn is_valid(&self, lifetime_secs: i64) -> bool {
         if let Some(ref expiration) = self.expiration {
             if let Ok(exp_time) = DateTime::parse_from_rfc3339(expiration) {
-                let now = Utc::now();
-                let buffer = chrono::Duration::minutes(5);
-                return now + buffer < exp_time.with_timezone(&Utc);
+                return is_fresh(exp_time.with_timezone(&Utc), Utc::now(), lifetime_secs);
             }
         }
         false
@@ -177,14 +197,11 @@ impl Drop for Credentials {
 }
 
 impl Credentials {
-    /// Check if credentials are still valid (with 5 minute buffer)
-    pub fn is_valid(&self) -> bool {
-        if let Some(exp_time) = self.expiration {
-            let now = Utc::now();
-            let buffer = chrono::Duration::minutes(5);
-            return now + buffer < exp_time;
-        }
-        false
+    /// Whether stored credentials are outside the refresh window for a
+    /// session configured to last `lifetime_secs` (see [`is_fresh`]).
+    pub fn is_valid(&self, lifetime_secs: i64) -> bool {
+        self.expiration
+            .is_some_and(|exp_time| is_fresh(exp_time, Utc::now(), lifetime_secs))
     }
 }
 
@@ -236,6 +253,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cache_and_keyring_refresh_before_sdk_refresh_windows() {
+        for (seconds_remaining, expected_fresh) in [
+            (3600, true),
+            (960, true),
+            (900, false),
+            (840, false),
+            (600, false),
+            (300, false),
+            (0, false),
+            (-60, false),
+        ] {
+            let expiration = Utc::now() + chrono::Duration::seconds(seconds_remaining);
+            let output = CredentialProcessOutput::new("test-key", "test-secret")
+                .with_expiration(expiration.to_rfc3339());
+            let stored = Credentials::from(output.clone());
+            assert_eq!(output.is_valid(3600), expected_fresh, "{seconds_remaining}");
+            assert_eq!(stored.is_valid(3600), expected_fresh, "{seconds_remaining}");
+            let profile = format!("freshness_{}", uuid::Uuid::new_v4());
+            let cache = crate::storage::cache::CacheHandle::new(&profile).unwrap();
+            cache.store(&output).unwrap();
+            assert_eq!(
+                cache.get_valid_credentials(3600).unwrap().is_some(),
+                expected_fresh
+            );
+            cache.clear().unwrap();
+        }
+        assert!(!CredentialProcessOutput::new("key", "secret")
+            .with_expiration("invalid")
+            .is_valid(3600));
+    }
+
+    #[test]
     fn test_credential_output_json() {
         let output = CredentialProcessOutput::new("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG")
             .with_session_token("AQoDYXdzEJr...<truncated>")
@@ -262,11 +311,85 @@ mod tests {
         let future = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
         let output =
             CredentialProcessOutput::new("AKIAIOSFODNN7EXAMPLE", "secret").with_expiration(future);
-        assert!(output.is_valid());
+        assert!(output.is_valid(3600));
 
         let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
         let output =
             CredentialProcessOutput::new("AKIAIOSFODNN7EXAMPLE", "secret").with_expiration(past);
-        assert!(!output.is_valid());
+        assert!(!output.is_valid(3600));
+    }
+
+    // (session duration, expected refresh buffer) in seconds: half the
+    // session for short sessions, capped at the SDK's 15-minute window.
+    const SESSION_BUFFERS: [(i32, i64); 4] = [(900, 450), (1200, 600), (3600, 900), (43200, 900)];
+
+    #[test]
+    fn refresh_buffer_scales_with_short_session_durations() {
+        let now = Utc::now();
+        for (duration, buffer) in SESSION_BUFFERS {
+            let lifetime = i64::from(duration);
+            for (seconds_remaining, expected_fresh) in [
+                (lifetime - 5, true),
+                (buffer + 1, true),
+                (buffer, false),
+                (buffer - 1, false),
+                (0, false),
+                (-60, false),
+            ] {
+                let expiration = now + chrono::Duration::seconds(seconds_remaining);
+                assert_eq!(
+                    is_fresh(expiration, now, lifetime),
+                    expected_fresh,
+                    "duration {duration}, {seconds_remaining}s remaining"
+                );
+            }
+        }
+        for lifetime in [0, -1] {
+            assert_eq!(refresh_buffer(lifetime), chrono::Duration::zero());
+        }
+    }
+
+    #[test]
+    fn short_session_credentials_are_served_from_cache() {
+        // Stale cases fall through to the keyring. Use the in-memory mock so
+        // the test does not depend on an OS keyring (headless Linux CI has no
+        // Secret Service and keyring read errors are now reported).
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        for (duration, buffer) in SESSION_BUFFERS {
+            let lifetime = i64::from(duration);
+            for (seconds_remaining, expected_fresh) in [
+                (lifetime - 5, true),
+                (buffer + 60, true),
+                (buffer - 1, false),
+                (-60, false),
+            ] {
+                let expiration = Utc::now() + chrono::Duration::seconds(seconds_remaining);
+                let output = CredentialProcessOutput::new("test-key", "test-secret")
+                    .with_expiration(expiration.to_rfc3339());
+                let label = format!("duration {duration}, {seconds_remaining}s remaining");
+                assert_eq!(output.is_valid(lifetime), expected_fresh, "{label}");
+                assert_eq!(
+                    Credentials::from(output.clone()).is_valid(lifetime),
+                    expected_fresh,
+                    "{label}"
+                );
+                let profile = format!("short_session_{}", uuid::Uuid::new_v4());
+                let cache = crate::storage::cache::CacheHandle::new(&profile).unwrap();
+                cache.store(&output).unwrap();
+                assert_eq!(
+                    cache.get_valid_credentials(lifetime).unwrap().is_some(),
+                    expected_fresh,
+                    "{label}"
+                );
+                assert_eq!(
+                    crate::auth::credentials::try_load_credentials(&profile, duration, false)
+                        .unwrap()
+                        .is_some(),
+                    expected_fresh,
+                    "{label}"
+                );
+                cache.clear().unwrap();
+            }
+        }
     }
 }

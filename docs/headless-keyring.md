@@ -102,7 +102,7 @@ printf '' | gnome-keyring-daemon --replace --daemonize --components=secrets --un
 
 ### 3. File fallback in awzars (code change — not yet implemented)
 
-Make the keyring the preferred store, fall back to a `0600` file in `~/.awzars/`
+Make the keyring the preferred store, fall back to a `0600` file in `<config-dir>/`
 when the keyring errors, and read from both on load. Drops the keyring
 dependency for the credential path entirely; existing keyring users unaffected.
 (The cookie store still encrypts with a keyring-held key, so fully keyring-free

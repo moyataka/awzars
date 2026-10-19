@@ -1,6 +1,6 @@
 [package]
 name = "awzars"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2021"
 authors = ["paul <awzars.net141@passmail.net>"]
 license = "MIT OR Apache-2.0"
@@ -115,12 +115,19 @@ tempfile = "3.9"
 
 # Per-profile password lock: Argon2id for verifier hashing.
 argon2 = "0.5"
+# Session unlock tokens: fingerprint of the lock verifier they were minted
+# under. Same major as the copy already pulled in by aws-sigv4.
+sha2 = "0.11"
 
 # Per-profile password lock: getsid() / kill(sid, 0) for session-scoped unlock tokens.
 # `term` adds termios bindings used to disable ECHO when reading a password
 # from /dev/tty (credential-process can't use dialoguer because AWS CLI pipes
 # the subprocess stderr that dialoguer reads from).
 nix = { version = "0.30", default-features = false, features = ["process", "signal", "term"] }
+
+# macOS: proc_pidinfo() for the unlock-scope ancestry walk (no /proc there).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [profile.release]
 lto = true

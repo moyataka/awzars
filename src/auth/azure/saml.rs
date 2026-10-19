@@ -19,6 +19,7 @@
 //   * `<AudienceRestriction>/<Audience>` contains the expected app ID URI
 //   * Current time is within `[NotBefore, NotOnOrAfter)` (30s clock skew)
 
+use crate::auth::aws::arn::{IamArn, IamResource};
 use crate::error::{AwzarsError, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Utc};
@@ -190,11 +191,13 @@ impl SamlAssertion {
         })
     }
 
-    /// Get available roles
+    /// Get available roles in stable account, role-path, and ARN order.
     pub fn roles(&self) -> Vec<(String, String)> {
-        self.roles
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+        let mut roles: Vec<_> = self.roles.iter().collect();
+        roles.sort_unstable_by(|(left, _), (right, _)| role_order(left).cmp(&role_order(right)));
+        roles
+            .into_iter()
+            .map(|(role, principal)| (role.clone(), principal.clone()))
             .collect()
     }
 
@@ -212,6 +215,13 @@ impl SamlAssertion {
     pub fn raw(&self) -> &str {
         &self.raw_xml
     }
+}
+
+fn role_order(role: &str) -> (&str, &str, &str) {
+    let mut components = role.splitn(6, ':');
+    let account = components.nth(4).unwrap_or_default();
+    let resource = components.next().unwrap_or_default();
+    (account, resource, role)
 }
 
 /// Locate the `<saml:Assertion>` element. Scoped by namespace so that a
@@ -267,25 +277,20 @@ fn is_role_attribute(node: &Node) -> bool {
     }
 }
 
-/// Parse a role value (format: "role_arn,principal_arn")
+/// Parse a role/provider pair in either order.
 fn parse_role_value(value: &str) -> Option<(String, String)> {
-    let parts: Vec<&str> = value.split(',').collect();
-    if parts.len() != 2 {
+    let (first, second) = value.split_once(',')?;
+    if second.contains(',') {
         return None;
     }
-
-    let role = parts[0].trim();
-    let principal = parts[1].trim();
-
-    // Validate ARNs
-    if role.starts_with("arn:aws:iam::") && principal.starts_with("arn:aws:iam::") {
-        Some((role.to_string(), principal.to_string()))
-    } else if role.starts_with("arn:aws:sts::") && principal.starts_with("arn:aws:iam::") {
-        // Handle STS roles
-        Some((role.to_string(), principal.to_string()))
-    } else {
-        None
-    }
+    let first = IamArn::parse(first.trim())?;
+    let second = IamArn::parse(second.trim())?;
+    let (role, principal) = match (first.resource(), second.resource()) {
+        (IamResource::Role, IamResource::SamlProvider) => (first, second),
+        (IamResource::SamlProvider, IamResource::Role) => (second, first),
+        _ => return None,
+    };
+    Some((role.as_str().to_string(), principal.as_str().to_string()))
 }
 
 /// Extract the assertion-level `<Issuer>` element.
@@ -408,6 +413,40 @@ mod tests {
     }
 
     #[test]
+    fn role_order_is_stable_across_assertions_and_input_order() {
+        let roles = [
+            "arn:aws-us-gov:iam::111111111111:role/Alpha",
+            "arn:aws:iam::111111111111:role/Zebra",
+            "arn:aws:iam::222222222222:role/Alpha",
+        ];
+        let original = "<saml:AttributeValue>arn:aws:iam::123456789012:role/MyRole,arn:aws:iam::123456789012:saml-provider/MyProvider</saml:AttributeValue>";
+        for order in [[2, 0, 1], [1, 2, 0], [0, 1, 2]] {
+            let values = order
+                .into_iter()
+                .map(|index| {
+                    let role = roles[index];
+                    let provider = role
+                        .replace("role/Alpha", "saml-provider/Provider")
+                        .replace("role/Zebra", "saml-provider/Provider");
+                    format!("<saml:AttributeValue>{role},{provider}</saml:AttributeValue>")
+                })
+                .collect::<String>();
+            let assertion = SamlAssertion::parse(
+                &encode(&valid_xml().replace(original, &values)),
+                TENANT_ID,
+                AUDIENCE,
+            )
+            .unwrap();
+            let actual: Vec<_> = assertion
+                .roles()
+                .into_iter()
+                .map(|(role, _)| role)
+                .collect();
+            assert_eq!(actual, roles);
+        }
+    }
+
+    #[test]
     fn test_parse_role_value() {
         let value = "arn:aws:iam::123456789012:role/MyRole,arn:aws:iam::123456789012:saml-provider/MyProvider";
         let result = parse_role_value(value);
@@ -424,6 +463,44 @@ mod tests {
     #[test]
     fn test_parse_role_value_invalid() {
         assert!(parse_role_value("not-a-valid-arn").is_none());
+    }
+
+    #[test]
+    fn role_pairs_accept_both_orders_and_supported_partitions() {
+        let original = "arn:aws:iam::123456789012:role/MyRole,arn:aws:iam::123456789012:saml-provider/MyProvider";
+        for partition in ["aws", "aws-cn", "aws-us-gov"] {
+            let role = format!("arn:{partition}:iam::123456789012:role/team/MyRole");
+            let provider = format!("arn:{partition}:iam::123456789012:saml-provider/MyProvider");
+            for pair in [
+                format!("{role},{provider}"),
+                format!(" {provider}, {role} "),
+            ] {
+                let assertion = SamlAssertion::parse(
+                    &encode(&valid_xml().replace(original, &pair)),
+                    TENANT_ID,
+                    AUDIENCE,
+                )
+                .unwrap();
+                assert_eq!(assertion.principal_for_role(&role), Some(provider.clone()));
+                assert_eq!(crate::cli::args::parse_role_arn(&role).unwrap(), role);
+            }
+        }
+    }
+
+    #[test]
+    fn role_pairs_reject_wrong_resource_kinds_and_malformed_arns() {
+        let role = "arn:aws:iam::123456789012:role/Role";
+        let provider = "arn:aws:iam::123456789012:saml-provider/Provider";
+        for pair in [
+            format!("{role},{role}"),
+            format!("{provider},{provider}"),
+            format!("{role},{provider},{role}"),
+            format!("arn:aws:iam::123:role/Role,{provider}"),
+            format!("arn:aws:sts::123456789012:assumed-role/Role/session,{provider}"),
+        ] {
+            assert!(parse_role_value(&pair).is_none(), "{pair}");
+        }
+        assert!(crate::cli::args::parse_role_arn(provider).is_err());
     }
 
     #[test]

@@ -97,7 +97,7 @@ impl Config {
     pub fn load() -> Result<Self> {
         use std::io::Read;
 
-        // Tighten ~/.awzars/ to 0o700 before reading anything out of it.
+        // Tighten the configuration directory to 0o700 before reading anything out of it.
         // Save also does this; doing it on load too closes the window where
         // a fresh install's first operation is a load (e.g. credential-process)
         // and the directory was pre-created with loose perms by another tool

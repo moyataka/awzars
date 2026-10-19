@@ -167,6 +167,7 @@ pub struct AzureLoginBrowser {
     headless: bool,
     remember_me: bool,
     is_remote: bool,
+    quiet: bool,
     profile: String,
     /// Ephemeral directory for non-remember-me sessions. Held so that it is
     /// cleaned up (deleted) when this struct is dropped after the browser exits.
@@ -221,15 +222,12 @@ impl AzureLoginBrowser {
     ) -> Result<Self> {
         let parsed = validate_ws_url(ws_url, allow_insecure)?;
 
-        // Prominent security warning
-        eprintln!(
-            "\x1b[1;31mWARNING\x1b[0m: Connecting to remote Chrome at {}",
+        tracing::warn!(
+            "Connecting to remote Chrome at {}. The authentication flow, including credentials, traverses this connection; only use a trusted Chrome instance.",
             redact_ws_url(&parsed)
         );
-        eprintln!("  The entire authentication flow (including credentials) will traverse this connection.");
-        eprintln!("  Only use this with Chrome instances you fully trust.");
         if parsed.scheme() == "ws" {
-            eprintln!("  Connection is \x1b[1;31mUNENCRYPTED\x1b[0m (ws://). Use wss:// for TLS.");
+            tracing::warn!("Connection is UNENCRYPTED (ws://). Use wss:// for TLS.");
         }
         // Separate cue for the network-crossing case. The general warning
         // above is the same regardless of host; an SSH-tunnelled loopback
@@ -237,7 +235,7 @@ impl AzureLoginBrowser {
         // operators routinely skim past warnings they've seen 100 times.
         // A dedicated line for non-loopback makes the WAN case visible.
         if !is_loopback_url(&parsed) {
-            eprintln!("  Host is non-loopback — credentials will traverse the network.");
+            tracing::warn!("Host is non-loopback — credentials will traverse the network.");
         }
 
         tracing::info!("Connecting to remote Chrome at {}", redact_ws_url(&parsed));
@@ -261,6 +259,7 @@ impl AzureLoginBrowser {
             headless,
             remember_me,
             is_remote: true,
+            quiet: false,
             profile: profile.to_string(),
             _ephemeral_dir: None,
         })
@@ -347,11 +346,14 @@ impl AzureLoginBrowser {
                             v
                         ))
                         .unwrap_or_default();
+                    let data_directory = config::chromium_data_dir(profile)
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|_| "the configured Chromium data directory".into());
                     AwzarsError::Browser(format!(
                         "Permission denied launching Chrome for profile '{}'.{} \
-                         If you previously ran awzars with sudo, fix with: \
-                         sudo chown -R \"$USER\" ~/.awzars/chromium/{}",
-                        profile, chrome_hint, profile
+                         If you previously ran awzars with sudo, check ownership \
+                         and permissions of {}.",
+                        profile, chrome_hint, data_directory
                     ))
                 } else {
                     AwzarsError::Browser(format!(
@@ -376,6 +378,7 @@ impl AzureLoginBrowser {
             headless,
             remember_me,
             is_remote: false,
+            quiet: false,
             profile: profile.to_string(),
             _ephemeral_dir: ephemeral_dir,
         })
@@ -405,10 +408,9 @@ impl AzureLoginBrowser {
 
         self.page = Some(page.clone());
 
-        // Inject saved cookies for local headless re-auth (from remote Chrome sessions).
-        // This enables credential-process to silently re-authenticate without needing
-        // a persistent Chrome user-data-dir (avoids SingletonLock conflicts).
-        if !self.is_remote && self.headless {
+        // Headed and headless local sessions both reuse the encrypted cookie
+        // store, including when it replaces a persistent user-data directory.
+        if !self.is_remote {
             if let Err(e) = self.inject_cookies_from_store(browser).await {
                 tracing::debug!("Cookie injection skipped: {}", e);
             }
@@ -417,18 +419,8 @@ impl AzureLoginBrowser {
         // Build Azure AD login URL (validates tenant_id is a UUID)
         let login_url = build_azure_login_url(tenant_id, app_id_uri)?;
 
-        tracing::info!("Navigating to Azure AD login");
-        page.goto(&login_url)
-            .await
-            .map_err(|e| AwzarsError::Browser(format!("Failed to navigate: {}", e)))?;
-
-        // Handle the login flow
-        self.handle_login_flow(&page).await?;
-
-        // Wait for redirect and extract SAML response
-        let saml_response = self.extract_saml_response(&page).await?;
-
-        Ok(saml_response)
+        let timeout = self.authentication_timeout()?;
+        super::saml_capture::capture(&page, &login_url, timeout).await
     }
 
     /// Gracefully close the browser process (or CDP session for remote Chrome).
@@ -449,8 +441,12 @@ impl AzureLoginBrowser {
         self.is_remote
     }
 
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
+    }
+
     /// Extract all cookies from the current browser session and save them to
-    /// the local cookie store. Called after successful remote Chrome auth to
+    /// the local cookie store. Called after successful remembered auth to
     /// enable subsequent local headless re-authentication.
     pub async fn save_cookies(&self) -> Result<()> {
         // Fail-closed if a legacy plaintext cookies.json is still on disk.
@@ -514,7 +510,7 @@ impl AzureLoginBrowser {
         crate::util::atomic_write(&path, &encrypted, 0o600)?;
 
         // Clean up old unencrypted cookie file if present. If removal fails,
-        // warn loudly on BOTH stderr and the tracing log — the plaintext cookie
+        // warn via the tracing log — the plaintext cookie
         // jar would otherwise persist on disk alongside the new encrypted
         // store, defeating the encryption. Subsequent calls into the cookie
         // store will fail-closed via `refuse_if_legacy_cookies_present` until
@@ -531,7 +527,6 @@ impl AzureLoginBrowser {
                     old_path.display(),
                     e
                 );
-                eprintln!("\x1b[1;31mWARNING\x1b[0m: {}", msg);
                 tracing::warn!("{}", msg);
             }
         }
@@ -606,127 +601,22 @@ impl AzureLoginBrowser {
             .unwrap_or(false)
     }
 
-    /// Handle the Azure AD login flow
-    async fn handle_login_flow(&self, page: &Page) -> Result<()> {
+    fn authentication_timeout(&self) -> Result<Duration> {
         if !self.headless {
-            // Headed mode: wait for user to complete login
-            eprintln!("Please complete the login in the browser window...");
-            eprintln!("Waiting for authentication...");
-            self.wait_for_authentication(page, Duration::from_secs(300))
-                .await?;
-        } else if self.remember_me || self.has_injected_cookies() {
-            // Headless mode with persistent session or injected cookies: rely on cookies for auto-redirect
+            if !self.quiet {
+                eprintln!("Please complete the login in the browser window...");
+                eprintln!("Waiting for authentication...");
+            }
+            Ok(Duration::from_secs(300))
+        } else if self.remember_me || Self::has_cookie_store(&self.profile) {
             tracing::info!("Headless mode: attempting cookie-based re-authentication");
-            self.wait_for_authentication(page, Duration::from_secs(30))
-                .await
-                .map_err(|_| {
-                    AwzarsError::Browser(
-                        "Headless re-authentication failed: session cookies may be expired. \
-                     Run `awzars login` (without --headless) to re-authenticate interactively."
-                            .to_string(),
-                    )
-                })?;
+            Ok(Duration::from_secs(30))
         } else {
-            return Err(AwzarsError::Browser(
-                "Headless mode requires --remember-me with a previous headed login to establish \
-                 a browser session. Run `awzars login --remember-me` first to create a session, \
-                 then use --headless for subsequent re-authentications."
-                    .to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Check if a cookie store file exists for this profile (injected cookies available).
-    fn has_injected_cookies(&self) -> bool {
-        Self::has_cookie_store(&self.profile)
-    }
-
-    /// Wait for user to complete authentication
-    async fn wait_for_authentication(&self, page: &Page, timeout: Duration) -> Result<()> {
-        let start = std::time::Instant::now();
-
-        loop {
-            if start.elapsed() > timeout {
-                return Err(AwzarsError::Browser("Authentication timed out".to_string()));
-            }
-
-            // Check if we've been redirected to AWS
-            if let Ok(Some(url)) = page.url().await {
-                if is_aws_redirect_url(&url) {
-                    tracing::info!("Authentication successful, redirect detected");
-                    return Ok(());
-                }
-            }
-
-            // SECURITY: Only check for SAML response on verified AWS pages.
-            // A non-AWS page must never cause us to believe auth is complete.
-            if let Ok(Some(url)) = page.url().await {
-                if is_aws_redirect_url(&url) {
-                    if let Ok(content) = page.content().await {
-                        // Page HTML embeds the SAMLResponse value; wrap so
-                        // the heap is wiped when this iteration ends.
-                        let content = Zeroizing::new(content);
-                        if content.contains("SAMLResponse") {
-                            tracing::info!("SAML response detected in page");
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-
-    /// Extract SAML response from the page.
-    ///
-    /// SECURITY: SAML data is ONLY extracted when the page URL is a verified
-    /// AWS sign-in / console redirect. This prevents attacker-controlled pages
-    /// from injecting fake SAML responses.
-    ///
-    /// Returns `Zeroizing<String>` so the heap-allocated assertion is wiped
-    /// on drop rather than left in freed memory.
-    async fn extract_saml_response(&self, page: &Page) -> Result<Zeroizing<String>> {
-        tracing::info!("Extracting SAML response");
-
-        let timeout = Duration::from_secs(60);
-        let start = std::time::Instant::now();
-
-        loop {
-            if start.elapsed() > timeout {
-                return Err(AwzarsError::Browser(
-                    "Timeout waiting for SAML response".to_string(),
-                ));
-            }
-
-            // SECURITY: Only extract from a verified AWS page. Any other page --
-            // including attacker-controlled content -- must never be a source.
-            let url = page.url().await.ok().flatten();
-            let on_aws_page = url.as_deref().map(is_aws_redirect_url).unwrap_or(false);
-
-            if on_aws_page {
-                // Path 1: CSS selector on form input
-                if let Ok(element) = page.find_element("input[name='SAMLResponse']").await {
-                    if let Ok(Some(value)) = element.attribute("value").await {
-                        tracing::info!("SAML response received from form");
-                        return Ok(Zeroizing::new(value));
-                    }
-                }
-
-                // Path 2: HTML content fallback. Wrap the page HTML so the
-                // SAMLResponse-bearing buffer is wiped after extraction.
-                if let Ok(content) = page.content().await {
-                    let content = Zeroizing::new(content);
-                    if let Some(saml) = extract_saml_from_html(&content) {
-                        tracing::info!("SAML response extracted from HTML");
-                        return Ok(Zeroizing::new(saml));
-                    }
-                }
-            }
-
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            Err(AwzarsError::Browser(
+                "Headless mode requires a saved session. Run `awzars login --remember-me` \
+                 without --headless first to establish a browser session."
+                    .into(),
+            ))
         }
     }
 }
@@ -801,9 +691,7 @@ fn redact_ws_url(u: &url::Url) -> String {
     }
 }
 
-use crate::auth::azure::protocol::{
-    build_azure_login_url, extract_saml_from_html, is_aws_redirect_url,
-};
+use crate::auth::azure::protocol::build_azure_login_url;
 
 /// Resolve the Chrome executable to use, bypassing chromiumoxide's built-in detection
 /// which can find broken PATH wrappers (e.g. Homebrew Cask installs whose .app was

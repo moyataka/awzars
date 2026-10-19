@@ -28,11 +28,14 @@ async fn main() -> ExitCode {
         _ => "trace",
     };
 
+    let log_filter = if args.quiet {
+        EnvFilter::new("error")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level))
+    };
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)),
-        )
+        .with_env_filter(log_filter)
         .init();
 
     match run(args).await {
@@ -64,25 +67,29 @@ async fn run(args: Args) -> awzars::error::Result<()> {
                     .interact()
                     .map_err(|e| AwzarsError::Dialog(e.to_string()))?;
                 if !confirmed {
-                    println!("Aborted.");
+                    if !args.quiet {
+                        println!("Aborted.");
+                    }
                     return Ok(());
                 }
             }
             awzars::storage::cache::clear_profile_cache(&args.profile)?;
             let keyring = awzars::storage::keyring::KeyringStorage::new(&args.profile)?;
             keyring.delete_credentials()?;
-            println!(
-                "Cache and keyring credentials cleared for profile '{}'",
-                args.profile
-            );
+            if !args.quiet {
+                println!(
+                    "Cache and keyring credentials cleared for profile '{}'",
+                    args.profile
+                );
+            }
             Ok(())
         }
         Command::DeleteProfile { yes } => {
-            awzars::cli::commands::delete_profile::run(&args.profile, *yes)
+            awzars::cli::commands::delete_profile::run(&args.profile, *yes, args.quiet)
         }
         Command::Tui => awzars::cli::commands::tui::execute(&args).await,
         Command::SetPassword { remove } => {
-            awzars::cli::commands::set_password::run(&args.profile, *remove)
+            awzars::cli::commands::set_password::run(&args.profile, *remove, args.quiet)
         }
         Command::Unlock {
             allow_ai,
@@ -95,8 +102,9 @@ async fn run(args: Args) -> awzars::error::Result<()> {
             *ttl_hours,
             *allow_long_ttl,
             *no_expire,
+            args.quiet,
         ),
-        Command::Lock => awzars::cli::commands::lock::run(&args.profile),
+        Command::Lock => awzars::cli::commands::lock::run(&args.profile, args.quiet),
     }
 }
 
@@ -147,5 +155,7 @@ fn error_to_exit_code(e: &AwzarsError) -> u8 {
         AwzarsError::AiContextBlocked { .. } => 8,
         AwzarsError::LockVerificationFailed => 9,
         AwzarsError::LockRequiresTty => 10,
+        AwzarsError::RefreshLockTimeout { .. } => 5,
+        AwzarsError::SessionUnlockUnavailable => 11,
     }
 }

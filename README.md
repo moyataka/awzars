@@ -41,7 +41,7 @@ remains the mature, widely-deployed option.
 | Memory zeroing | Best-effort GC | `zeroize` (Drop-based) on every secret |
 | Cookie persistence | n/a (or plaintext) | ChaCha20-Poly1305 with rotating keyring-backed keys |
 | AI-agent fence | n/a | Opt-in per-profile password lock + `CLAUDECODE` / `AI_AGENT` consent gate |
-| TUI config manager | n/a | `awzars tui` (full CRUD on `~/.awzars/config.toml` and `~/.aws/config`) |
+| TUI config manager | n/a | `awzars tui` (full CRUD on `<config-dir>/config.toml` and `~/.aws/config`) |
 | Headless re-auth | Manual flag plumbing | Automatic in `credential-process` via saved cookies |
 | Remote Chrome | Limited | First-class (`CHROME_REMOTE_URL`, `wss://` enforced) |
 
@@ -271,7 +271,7 @@ aws s3 ls --profile work                  # 3. AWS CLI now refreshes credentials
 awzars configure
 ```
 
-Prompts for Azure AD tenant ID, app ID URI, optional default role ARN, and session duration; writes `~/.awzars/config.toml` (mode `0o600`).
+Prompts for Azure AD tenant ID, app ID URI, optional default role ARN, and session duration; writes `<config-dir>/config.toml` (mode `0o600` on Unix). See [Configuration](#configuration) for your platform's directory.
 
 ### 2. Login
 
@@ -282,6 +282,23 @@ awzars login
 Opens a browser, performs Azure AD login (MFA supported), extracts the SAML
 assertion, calls `AssumeRoleWithSAML`, and caches the resulting AWS
 credentials in the OS keyring + in-memory cache.
+
+Cached credentials refresh when 15 minutes or less remain, matching the AWS
+SDK's advisory refresh window. Sessions shorter than 30 minutes use half the
+session duration instead, so a 15-minute session is reused from the cache
+until 7.5 minutes remain. Session duration defaults to the profile's setting
+(one hour if unset); `--session-duration` overrides it and forces a fresh
+login. Cached credentials are always judged by the profile's session duration,
+even when they came from a login with a different `--session-duration`.
+
+`AWZARS_AZURE_TENANT_ID` and `AWZARS_AZURE_APP_ID_URI` supply defaults for
+`--azure-tenant` and `--azure-app` in login and configure. Explicit flags take
+precedence. The common Azure SDK variables `AZURE_TENANT_ID` and
+`AZURE_APP_ID_URI` are ignored.
+
+Login overrides (`--role-arn`, `--azure-tenant`, or `--azure-app`) always
+authenticate afresh. Their credentials are returned for that invocation only;
+the profile's cached credentials and saved role remain unchanged.
 
 Useful flags:
 
@@ -324,13 +341,19 @@ awzars tui
 
 Full-screen terminal UI (ratatui) with two tabs:
 
-- **awzars profiles** (`~/.awzars/config.toml`) — full CRUD
+- **awzars profiles** (`<config-dir>/config.toml`) — full CRUD
 - **AWS config** (`~/.aws/config`) — full CRUD for awzars-linked profiles,
   edit-only for others (SSO / static / assume-role)
 
 Key bindings: `↑/↓/j/k` navigate, `a` add, `e`/`Enter` edit, `d` delete,
 `Tab`/`Shift+Tab` switch tabs, `Ctrl+S` save, `Ctrl+D` clear focused field,
 `Esc` cancel, `q` quit.
+
+Adding or renaming to an existing name is rejected. Existing awzars profile
+names are read-only because browser sessions, password locks, and AWS links
+belong to that name. To change one, clone the profile under a new name, set
+its password lock if needed, update the AWS links, and then delete the old
+profile to clean up its saved state.
 
 Assume-role profiles (`source_profile` + `role_arn`) get a dedicated form
 that exposes `role_session_name` alongside the source-profile autocomplete,
@@ -371,8 +394,8 @@ These work on every subcommand:
 |---|---|
 | `--profile <name>` | Pick an awzars profile (default: `default`) |
 | `-v` / `-vv` / `-vvv` | Tracing verbosity: `info` / `debug` / `trace` |
-| `--quiet` | Warn-and-up only (suppresses `info` logs even at `-v`) |
-| `--config-dir <path>` | Override `~/.awzars/`; equivalent to env `AWZARS_CONFIG_DIR` |
+| `--quiet` | Suppresses status text, text/table results, and logs below error; overrides `-v` and `RUST_LOG`. JSON output, required prompts, and the requested TUI remain available. |
+| `--config-dir <path>` | Use an absolute configuration directory; takes precedence over `AWZARS_CONFIG_DIR` |
 | `--output text\|json\|table` | Output shape for `login` and `list-roles` |
 
 ### Exit codes
@@ -386,12 +409,13 @@ For wrappers and shell scripts:
 | `2` | Config error (missing profile, malformed `config.toml`) |
 | `3` | Azure / SAML auth failure |
 | `4` | Browser or network failure |
-| `5` | AWS STS / keyring / cache failure |
+| `5` | AWS STS / keyring / cache failure, or the refresh-lock wait timed out |
 | `6` | TUI / dialog failure |
 | `7` | Profile is password-locked and not unlocked in this session |
 | `8` | AI agent context detected without consent |
 | `9` | Password verification failed |
 | `10` | Lock operation needed a TTY but stdin isn't one |
+| `11` | Session unlock unavailable: the current boot session cannot be identified |
 
 ## Remote Chrome
 
@@ -410,8 +434,10 @@ export CHROME_REMOTE_URL="wss://chrome-host:9222/devtools/browser/<id>"
 awzars login --remember-me
 ```
 
-After the first `--remember-me` login via remote Chrome, session cookies are
-extracted and saved locally (encrypted), so subsequent
+After a successful `--remember-me` login via local or remote Chrome, session
+cookies are saved locally (encrypted). Local headed and headless logins reuse
+this store; a remembered login refreshes it, including after expired cookies
+require an interactive sign-in. Subsequent
 `awzars credential-process` calls run against **local** headless Chrome —
 no remote instance needed for refreshes.
 
@@ -420,10 +446,41 @@ Linux, etc.).
 
 ## Configuration
 
-`~/.awzars/config.toml` (mode `0o600`, dir `0o700`):
+`<config-dir>` means the resolved awzars configuration directory:
+
+| Platform | Default configuration directory |
+|---|---|
+| Linux | `$XDG_CONFIG_HOME/awzars` when the variable is an absolute path; otherwise `~/.config/awzars` |
+| macOS | `~/Library/Application Support/com.awzars.awzars` |
+| Windows | `%APPDATA%\awzars\awzars\config` |
+
+These paths come from `ProjectDirs::from("com", "awzars", "awzars")`.
+`--config-dir <absolute-path>` takes precedence over `AWZARS_CONFIG_DIR`,
+which takes precedence over the platform default. `~/.awzars` is only used
+if selected explicitly through an override. The AWS configuration file is
+separate: `aws_config_path` overrides its usual `~/.aws/config` location.
+
+```text
+<config-dir>/                     awzars settings and browser state
+|-- config.toml                   profiles and preferences
+|-- refresh-<profile>.lock        coordinates credential refreshes
+`-- chromium/<profile>/          remembered browser data
+    `-- cookies.enc              encrypted session cookies
+```
+
+`refresh-<profile>.lock` makes concurrent `login` and `credential-process`
+calls for the same profile refresh one at a time, so only one of them opens a
+browser. Calls with valid cached credentials return without waiting for it,
+and `login` prompts (remember-me, role selection) run outside it. A call that
+must wait gives up after 60 seconds with a message saying another login or
+refresh is in progress; set `AWZARS_REFRESH_LOCK_TIMEOUT_SECS` to a positive
+whole number of seconds to change that limit. The lock file is never deleted.
+
+The directory has mode `0o700` and `config.toml` has mode `0o600` on Unix.
+Example `<config-dir>/config.toml`:
 
 ```toml
-aws_config_path = "~/.aws/config"   # optional override for the TUI
+aws_config_path = "~/.aws/config"   # optional override for AWS profile editing and orphan checks
 
 [profiles.default.azure]
 tenant_id = "00000000-0000-0000-0000-000000000000"
@@ -431,14 +488,14 @@ app_id_uri = "https://signin.aws.amazon.com/saml"
 
 [profiles.work]
 role_arn = "arn:aws:iam::123456789012:role/MyRole"
-session_duration = 3600
 [profiles.work.azure]
 tenant_id = "11111111-1111-1111-1111-111111111111"
 app_id_uri = "https://signin.aws.amazon.com/saml"
+session_duration = 3600
 ```
 
-Override the config dir entirely with `--config-dir <path>` or
-`AWZARS_CONFIG_DIR=<path>`.
+Use the same override on each invocation, including the command saved in
+AWS `credential_process`, when using a custom awzars configuration directory.
 
 ## Troubleshooting
 

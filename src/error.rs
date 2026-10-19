@@ -82,6 +82,20 @@ pub enum AwzarsError {
 
     #[error("Lock and unlock require an interactive terminal (TTY).")]
     LockRequiresTty,
+
+    #[error(
+        "Another awzars login or credential refresh for profile '{profile}' is in \
+         progress (for example a login waiting for browser sign-in); waited \
+         {waited_secs}s. Retry once it finishes, or raise \
+         AWZARS_REFRESH_LOCK_TIMEOUT_SECS."
+    )]
+    RefreshLockTimeout { profile: String, waited_secs: u128 },
+
+    #[error(
+        "Cannot determine the current boot session; session unlock is \
+         unavailable in this environment."
+    )]
+    SessionUnlockUnavailable,
 }
 
 impl From<toml::de::Error> for AwzarsError {
