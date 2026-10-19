@@ -20,8 +20,9 @@
 //! `UnlockToken::is_expired` treats as "never". The token still dies with
 //! the terminal session — `$XDG_RUNTIME_DIR` is tmpfs (auto-reaped on
 //! logout) and `gc_stale_unlocks` drops tokens whose SID is no longer
-//! alive — and with a reboot, since tokens are bound to the boot. There is no time fallback, so a forgotten unlock on a
-//! long-lived session has no safety net beyond logging out.
+//! alive — and with a reboot, since tokens are bound to the boot. There is
+//! no time fallback, so a forgotten unlock on a long-lived session has no
+//! safety net beyond logging out or rebooting.
 
 use crate::auth::lock;
 use crate::cli::args::{LOCK_TTL_HARD_CAP_HOURS, LOCK_TTL_SOFT_CAP_HOURS};
