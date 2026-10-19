@@ -82,6 +82,13 @@ pub enum AwzarsError {
 
     #[error("Lock and unlock require an interactive terminal (TTY).")]
     LockRequiresTty,
+
+    #[error(
+        "Another awzars login or credential refresh for profile '{profile}' is in \
+         progress (for example a login waiting for browser sign-in or a prompt); \
+         waited {waited_secs}s. Retry once it finishes."
+    )]
+    RefreshLockTimeout { profile: String, waited_secs: u128 },
 }
 
 impl From<toml::de::Error> for AwzarsError {

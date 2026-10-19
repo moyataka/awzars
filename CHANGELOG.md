@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Docs: per-platform configuration paths (#19).
 - Credentials from short sessions (under 30 minutes) are reused from the cache instead of re-running the browser login on every call (#22).
 - Keychain read errors are reported instead of being treated as a missing entry, so existing keys are kept.
+- Concurrent `credential-process`/`login` calls no longer hang indefinitely on the profile refresh lock: prompts run outside the lock and waiters give up after 60 s (configurable with `AWZARS_REFRESH_LOCK_TIMEOUT_SECS`) with a clear message (#23).
 
 ## [1.0.3] - 2026-06-17
 

@@ -467,6 +467,14 @@ separate: `aws_config_path` overrides its usual `~/.aws/config` location.
     `-- cookies.enc              encrypted session cookies
 ```
 
+`refresh-<profile>.lock` makes concurrent `login` and `credential-process`
+calls for the same profile refresh one at a time, so only one of them opens a
+browser. `login` prompts (remember-me, role selection) run outside the lock,
+and a `login` with valid cached credentials does not wait for it. A call that
+must wait gives up after 60 seconds with a message saying another login or
+refresh is in progress; set `AWZARS_REFRESH_LOCK_TIMEOUT_SECS` to a positive whole number of
+seconds to change that limit. The lock file is never deleted.
+
 The directory has mode `0o700` and `config.toml` has mode `0o600` on Unix.
 Example `<config-dir>/config.toml`:
 

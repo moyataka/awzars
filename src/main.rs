@@ -155,5 +155,6 @@ fn error_to_exit_code(e: &AwzarsError) -> u8 {
         AwzarsError::AiContextBlocked { .. } => 8,
         AwzarsError::LockVerificationFailed => 9,
         AwzarsError::LockRequiresTty => 10,
+        AwzarsError::RefreshLockTimeout { .. } => 5,
     }
 }
