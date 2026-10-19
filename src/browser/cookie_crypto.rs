@@ -15,12 +15,13 @@
 //! any in-flight cookie file written under an older key.
 
 use crate::error::{AwzarsError, Result};
-use crate::storage::keyring::KeyringStorage;
+use crate::storage::keyring::{read_secret, KeyringStorage};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
+use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU8;
@@ -153,8 +154,12 @@ fn serialize_keystore(store: &CachedStore) -> Result<Zeroizing<String>> {
 }
 
 fn save_keystore(keyring: &KeyringStorage, store: &CachedStore) -> Result<()> {
-    let serialized = serialize_keystore(store)?;
     let entry = keyring.entry_for_field("cookie_key")?;
+    save_keystore_to_entry(&entry, store)
+}
+
+fn save_keystore_to_entry(entry: &Entry, store: &CachedStore) -> Result<()> {
+    let serialized = serialize_keystore(store)?;
     entry
         .set_password(&serialized)
         .map_err(|e| AwzarsError::Keyring(format!("Failed to store cookie keystore: {}", e)))?;
@@ -164,23 +169,28 @@ fn save_keystore(keyring: &KeyringStorage, store: &CachedStore) -> Result<()> {
 fn load_or_init_store(profile: &str) -> Result<CachedStore> {
     let keyring = KeyringStorage::new(profile)?;
     let entry = keyring.entry_for_field("cookie_key")?;
-    let now = now_unix_secs();
+    load_or_init_from_entry(&entry, now_unix_secs())
+}
 
-    match entry.get_password() {
-        Ok(value) => {
-            // The String returned by the OS keychain holds the base64-encoded
-            // cookie keys. Wrap it so the heap buffer is wiped after we parse.
-            let value: Zeroizing<String> = Zeroizing::new(value);
+/// Load the keystore from `entry`, creating and saving a new one only when
+/// the entry does not exist. Any other keychain read error is returned and
+/// nothing is written, so an existing keystore is never replaced because it
+/// could not be read.
+fn load_or_init_from_entry(entry: &Entry, now: i64) -> Result<CachedStore> {
+    // `read_secret` returns the value wrapped in `Zeroizing`, so the
+    // base64-encoded cookie keys are wiped from heap after we parse.
+    match read_secret(entry, "the cookie encryption key")? {
+        Some(value) => {
             let store = parse_keystore(&value, now)?;
             // If we read the legacy single-key format, persist the JSON
             // version so the next read takes the fast path.
             let is_legacy = serde_json::from_str::<KeyStoreJson>(&value).is_err();
             if is_legacy {
-                save_keystore(&keyring, &store)?;
+                save_keystore_to_entry(entry, &store)?;
             }
             Ok(store)
         }
-        Err(_) => {
+        None => {
             let key = generate_key()?;
             let mut keys = BTreeMap::new();
             keys.insert(1u8, Zeroizing::new(key));
@@ -191,7 +201,7 @@ fn load_or_init_store(profile: &str) -> Result<CachedStore> {
                 keys,
                 created_at,
             };
-            save_keystore(&keyring, &store)?;
+            save_keystore_to_entry(entry, &store)?;
             Ok(store)
         }
     }
@@ -570,5 +580,70 @@ mod tests {
         assert!(!store.keys.contains_key(&1), "key 1 should be GC'd");
         assert!(store.keys.contains_key(&2), "key 2 should be retained");
         assert!(store.keys.contains_key(&3));
+    }
+
+    fn mock_entry() -> Entry {
+        Entry::new_with_credential(Box::new(keyring::mock::MockCredential::default()))
+    }
+
+    fn mock_of(entry: &Entry) -> &keyring::mock::MockCredential {
+        entry
+            .get_credential()
+            .downcast_ref::<keyring::mock::MockCredential>()
+            .expect("mock credential")
+    }
+
+    fn read_errors() -> Vec<keyring::Error> {
+        vec![
+            keyring::Error::NoStorageAccess("keychain locked".into()),
+            keyring::Error::PlatformFailure("platform failure".into()),
+            keyring::Error::BadEncoding(vec![0xff, 0xfe]),
+        ]
+    }
+
+    #[test]
+    fn load_or_init_creates_keystore_when_entry_absent() {
+        let entry = mock_entry();
+        let now = now_unix_secs();
+        let store = load_or_init_from_entry(&entry, now).unwrap();
+        assert_eq!(store.current, NonZeroU8::MIN);
+
+        let saved = entry.get_password().expect("keystore saved");
+        let parsed = parse_keystore(&saved, now).unwrap();
+        assert_eq!(parsed.current, store.current);
+        assert_eq!(
+            *parsed.keys[&1], *store.keys[&1],
+            "saved key must match the returned key"
+        );
+    }
+
+    #[test]
+    fn load_or_init_read_error_does_not_create_keystore() {
+        for err in read_errors() {
+            let entry = mock_entry();
+            mock_of(&entry).set_error(err);
+            assert!(load_or_init_from_entry(&entry, now_unix_secs()).is_err());
+            assert!(
+                matches!(entry.get_password(), Err(keyring::Error::NoEntry)),
+                "nothing may be written after a read error"
+            );
+        }
+    }
+
+    #[test]
+    fn load_or_init_read_error_keeps_existing_keystore() {
+        for err in read_errors() {
+            let entry = mock_entry();
+            let now = now_unix_secs();
+            let original = load_or_init_from_entry(&entry, now).unwrap();
+            let before = entry.get_password().unwrap();
+
+            mock_of(&entry).set_error(err);
+            assert!(load_or_init_from_entry(&entry, now).is_err());
+
+            assert_eq!(entry.get_password().unwrap(), before);
+            let reloaded = load_or_init_from_entry(&entry, now).unwrap();
+            assert_eq!(*reloaded.keys[&1], *original.keys[&1]);
+        }
     }
 }
