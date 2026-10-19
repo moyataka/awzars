@@ -52,21 +52,12 @@ impl KeyringStorage {
     /// pre-consolidation versions are ignored — the next `store_credentials`
     /// after a re-login will write the new format. Reading the legacy layout
     /// here would cost up to 4 macOS Keychain dialogs per call.
+    ///
+    /// Returns `Ok(None)` only when no entry exists. Any other keychain error
+    /// is returned so the caller does not treat an unreadable entry as empty.
     pub fn get_credentials(&self) -> Result<Option<Credentials>> {
-        let entry = match self.entry_for_field("credentials") {
-            Ok(e) => e,
-            Err(_) => return Ok(None),
-        };
-        // Wrap the keychain payload so the JSON-encoded secret is wiped from
-        // heap after we deserialize.
-        let json: Zeroizing<String> = match entry.get_password() {
-            Ok(j) => Zeroizing::new(j),
-            Err(_) => return Ok(None),
-        };
-        let output: CredentialProcessOutput = serde_json::from_str(&json).map_err(|e| {
-            AwzarsError::Keyring(format!("Failed to deserialize credentials: {}", e))
-        })?;
-        Ok(Some(Credentials::from(output)))
+        let entry = self.entry_for_field("credentials")?;
+        credentials_from_entry(&entry)
     }
 
     /// Delete credentials from keychain
@@ -121,5 +112,107 @@ impl KeyringStorage {
         let username = format!("{}:{}", self.profile, key);
         Entry::new(&self.service_name, &username)
             .map_err(|e| AwzarsError::Keyring(format!("Failed to create keyring entry: {}", e)))
+    }
+}
+
+/// Read a secret from a keychain entry.
+///
+/// Returns `Ok(None)` only when the entry does not exist
+/// (`keyring::Error::NoEntry`). Every other keychain error — locked keychain,
+/// denied access, platform failure, undecodable value — is returned as an
+/// error, so callers never mistake an unreadable item for a missing one and
+/// overwrite it. `item` is a human-readable name used in the error message.
+///
+/// The returned value is wrapped in `Zeroizing` so the secret is wiped from
+/// heap memory when dropped.
+pub fn read_secret(entry: &Entry, item: &str) -> Result<Option<Zeroizing<String>>> {
+    match entry.get_password() {
+        Ok(value) => Ok(Some(Zeroizing::new(value))),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(AwzarsError::Keyring(format!(
+            "cannot read {} from the OS keychain ({}); not regenerating it — \
+             unlock the keychain or allow access, then retry",
+            item, e
+        ))),
+    }
+}
+
+/// Deserialize the consolidated credentials JSON held in `entry`.
+fn credentials_from_entry(entry: &Entry) -> Result<Option<Credentials>> {
+    let json = match read_secret(entry, "the stored AWS credentials")? {
+        Some(j) => j,
+        None => return Ok(None),
+    };
+    let output: CredentialProcessOutput = serde_json::from_str(&json)
+        .map_err(|e| AwzarsError::Keyring(format!("Failed to deserialize credentials: {}", e)))?;
+    Ok(Some(Credentials::from(output)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keyring::mock::MockCredential;
+
+    fn mock_entry() -> Entry {
+        Entry::new_with_credential(Box::new(MockCredential::default()))
+    }
+
+    fn mock_of(entry: &Entry) -> &MockCredential {
+        entry
+            .get_credential()
+            .downcast_ref::<MockCredential>()
+            .expect("mock credential")
+    }
+
+    fn read_errors() -> Vec<keyring::Error> {
+        vec![
+            keyring::Error::NoStorageAccess("keychain locked".into()),
+            keyring::Error::PlatformFailure("platform failure".into()),
+            keyring::Error::BadEncoding(vec![0xff, 0xfe]),
+        ]
+    }
+
+    #[test]
+    fn read_secret_missing_entry_is_none() {
+        let entry = mock_entry();
+        assert!(read_secret(&entry, "item").unwrap().is_none());
+    }
+
+    #[test]
+    fn read_secret_returns_stored_value() {
+        let entry = mock_entry();
+        entry.set_password("value").unwrap();
+        let v = read_secret(&entry, "item").unwrap().expect("value");
+        assert_eq!(v.as_str(), "value");
+    }
+
+    #[test]
+    fn read_secret_propagates_other_errors() {
+        for err in read_errors() {
+            let entry = mock_entry();
+            mock_of(&entry).set_error(err);
+            let res = read_secret(&entry, "the test item");
+            match res {
+                Err(AwzarsError::Keyring(msg)) => {
+                    assert!(msg.contains("the test item"), "message: {}", msg)
+                }
+                other => panic!("expected Keyring error, got {:?}", other.map(|_| ())),
+            }
+        }
+    }
+
+    #[test]
+    fn credentials_missing_entry_is_none() {
+        let entry = mock_entry();
+        assert!(credentials_from_entry(&entry).unwrap().is_none());
+    }
+
+    #[test]
+    fn credentials_read_error_is_reported() {
+        for err in read_errors() {
+            let entry = mock_entry();
+            mock_of(&entry).set_error(err);
+            assert!(credentials_from_entry(&entry).is_err());
+        }
     }
 }
