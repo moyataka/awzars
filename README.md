@@ -195,12 +195,15 @@ ldd target/x86_64-unknown-linux-musl/release/awzars
 
 ### 5. Quality gates run in CI
 
+CI runs these for every push and pull request to `dev` and `main` (and
+weekly): `cargo fmt` on Linux, clippy and tests on Linux and macOS, plus a
+static musl build and `cargo deny`. Windows is not built in CI yet.
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
-cargo deny check          # supply-chain bans (openssl, native-tls)
-cargo audit               # advisory scanner
+cargo test --all-targets
+cargo deny check          # advisories, licences, bans (openssl, native-tls), sources
 ```
 
 ## Install
@@ -594,8 +597,8 @@ so a persistent session exists for silent refreshes.
   keys garbage-collected after 90 days. The keystore is one keyring item per
   profile, so macOS Keychain ACL is granted once and rotation never
   re-prompts.
-- **CI runs `cargo fmt --check`, `clippy -D warnings`, tests, `cargo deny check`,
-  and `cargo audit`** on every PR.
+- **CI runs `cargo fmt --check`, `clippy -D warnings`, tests and `cargo deny check`**
+  (RustSec advisories, licences, banned crates) on every PR, and weekly.
 
 Full threat model and accepted residual risks are in
 [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md).
