@@ -820,6 +820,58 @@ pub fn remove_unlock(profile: &str) -> Result<()> {
     }
 }
 
+/// The profile a `<scope_key>-<profile>` file stem belongs to, or `None` when
+/// the stem does not start with a well-formed scope key. Scope values are
+/// `-`-free, so the split is unambiguous: `env-x-a-b` is profile `a-b`, never
+/// `b`.
+fn profile_from_stem(stem: &str) -> Option<&str> {
+    let key = scope_key_from_stem(stem)?;
+    SessionScope::from_key(&key)?;
+    stem.get(key.len() + 1..)
+        .filter(|profile| !profile.is_empty())
+}
+
+/// Remove every session token (unlock and AI consent) and failed-attempt
+/// counter for `profile`, across all session scopes. Called when the
+/// profile's lock is set, changed or removed and when the profile is deleted,
+/// so no session keeps access granted under the previous state.
+///
+/// Only regular files named exactly `<scope_key>-<profile>.json` / `.fails`
+/// are removed; symlinks, directories and unrecognised names are left alone.
+/// Attempts every match and returns the first removal error, if any.
+pub fn revoke_all_unlocks(profile: &str) -> Result<()> {
+    let dir = unlock_dir()?;
+    let mut first_err = None;
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        // `DirEntry::file_type` does not follow symlinks.
+        if !entry.file_type().is_ok_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(stem) = name
+            .strip_suffix(".json")
+            .or_else(|| name.strip_suffix(".fails"))
+        else {
+            continue;
+        };
+        if profile_from_stem(stem) != Some(profile) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e.into()),
+        None => Ok(()),
+    }
+}
+
 /// Read at most `max` bytes from `path`. Returns `Err` on any IO error or
 /// if the file exceeds the cap. Used by `gc_stale_unlocks` to keep a
 /// hostile / corrupt file in the session dir from blowing up the GC pass.
@@ -1299,6 +1351,78 @@ mod tests {
         ));
         std::env::remove_var(&marker);
         let _ = remove_unlock(&prof);
+    }
+
+    #[test]
+    fn lock_change_clears_tokens_in_every_scope() {
+        let _g = temp_xdg();
+        let prof = format!("test_sweep_{}", std::process::id());
+
+        // Unlock in session A.
+        std::env::set_var("AWZARS_SESSION_ID", "sweep_a");
+        write_unlock(&prof, 3600, false, true, Some(TEST_VERIFIER)).unwrap();
+        let path_a = token_path(&session_scope().unwrap(), &prof).unwrap();
+        assert!(path_a.exists());
+
+        // The lock changes from session B.
+        std::env::set_var("AWZARS_SESSION_ID", "sweep_b");
+        revoke_all_unlocks(&prof).unwrap();
+
+        // Session A's token is gone, and A is locked again.
+        std::env::set_var("AWZARS_SESSION_ID", "sweep_a");
+        assert!(!path_a.exists());
+        assert!(matches!(
+            enforce(&prof, &locked_profile(TEST_VERIFIER), false, false),
+            Err(AwzarsError::LockedProfile { .. })
+        ));
+        std::env::remove_var("AWZARS_SESSION_ID");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_change_sweep_matches_the_exact_profile_only() {
+        let _g = temp_xdg();
+        let dir = unlock_dir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("target.json");
+        std::fs::write(&target, b"{}").unwrap();
+
+        let swept = ["env-x-p.json", "env-x-p.fails", "sid-42-p.json"];
+        let kept = [
+            "env-x-a-p.json",  // profile `a-p`
+            "env-x-a-p.fails", // profile `a-p`
+            "env-x-pp.json",   // profile `pp`
+            "p.json",          // no scope key
+            "bogus-x-p.json",  // unknown scope tag
+            "env-x-p.txt",     // unknown extension
+            "notes",           // unrelated file
+        ];
+        for name in swept.iter().chain(kept.iter()) {
+            std::fs::write(dir.join(name), b"{}").unwrap();
+        }
+        std::os::unix::fs::symlink(&target, dir.join("env-y-p.json")).unwrap();
+
+        revoke_all_unlocks("p").unwrap();
+
+        for name in swept {
+            assert!(!dir.join(name).exists(), "{} should be removed", name);
+        }
+        for name in kept {
+            assert!(dir.join(name).exists(), "{} should be kept", name);
+        }
+        // The symlink itself and its target are both left alone.
+        assert!(std::fs::symlink_metadata(dir.join("env-y-p.json")).is_ok());
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn profile_recovered_from_stem() {
+        assert_eq!(profile_from_stem("env-x-p"), Some("p"));
+        assert_eq!(profile_from_stem("env-x-a-p"), Some("a-p"));
+        assert_eq!(profile_from_stem("sid-42-my-profile"), Some("my-profile"));
+        assert_eq!(profile_from_stem("sid-notanumber-p"), None);
+        assert_eq!(profile_from_stem("env-x-"), None);
+        assert_eq!(profile_from_stem("p"), None);
     }
 
     #[test]
