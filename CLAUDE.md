@@ -243,7 +243,7 @@ Schema additions on `Profile` (all `Option<_>`, omitted when unset): `lock_verif
 - SAML client-side validation: issuer (URL-normalized), audience, Recipient, time window (30s skew), inverted-time-window rejection. **No XML-DSIG verification client-side** — integrity is delegated to TLS-to-Azure plus AWS STS re-verification in `AssumeRoleWithSAML`.
 - Error messages redacted to avoid leaking tenant IDs, issuer URLs, or Recipient values
 - Safe Rust except for small, `SAFETY`-commented macOS FFI calls in `auth/lock.rs` (`proc_pidinfo`, `sysctlbyname`)
-- CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `clippy -D warnings`, tests, `cargo deny check`, `cargo audit` on every PR
+- CI (`.github/workflows/ci.yml`) runs on push/PR to `dev`/`main` and weekly: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --all-targets` on Linux and macOS; `cargo deny check`; and a static musl build via cargo-zigbuild. Windows is not built in CI yet. Release artifacts are built manually.
 
 ## Configuration
 
