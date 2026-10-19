@@ -202,7 +202,7 @@ Schema additions on `Profile` (all `Option<_>`, omitted when unset): `lock_verif
 
 ## Key Dependencies
 
-- **chromiumoxide** (0.9, rustls): Chrome DevTools Protocol for browser automation
+- **chromiumoxide** (0.9, default features off — CDP client only, no browser download): Chrome DevTools Protocol for browser automation
 - **aws-config / aws-sdk-sts** (`default-https-client` → `rustls-aws-lc`,
   rustls 0.23): STS AssumeRoleWithSAML. The legacy `rustls` feature flag
   (which pulled rustls 0.21 via `legacy-rustls-ring`) is deliberately not
