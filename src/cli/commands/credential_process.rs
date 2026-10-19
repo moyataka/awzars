@@ -44,7 +44,11 @@ pub async fn execute(args: &Args) -> Result<()> {
     // persisted by the previous holder before considering another browser.
     let _refresh_guard =
         crate::auth::credentials::CredentialRefreshGuard::acquire(&args.profile).await?;
-    if let Some(creds) = crate::auth::credentials::try_load_credentials(&args.profile, refresh)? {
+    if let Some(creds) = crate::auth::credentials::try_load_credentials(
+        &args.profile,
+        profile.azure.session_duration,
+        refresh,
+    )? {
         write_credentials_json(&creds)?;
         return Ok(());
     }

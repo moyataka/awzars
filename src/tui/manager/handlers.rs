@@ -9,6 +9,7 @@ use super::{ConfigManager, Mode, StatusLevel, Tab};
 use crate::error::{AwzarsError, Result};
 use crate::tui::aws_config::{
     build_awzars_credential_process, detect_awzars_binary, load_aws_integration, save_aws_config,
+    AwsProfileOp, SaveError,
 };
 use crate::tui::form::{AwsProfileForm, ProfileForm, AWS_IDX_SOURCE_PROFILE};
 use crate::tui::form_ops::{key_to_field_op, move_index, FieldOp};
@@ -17,6 +18,27 @@ use crossterm::event::{KeyCode, KeyModifiers};
 #[cfg(test)]
 #[path = "handlers_tests.rs"]
 mod tests;
+
+/// Status line for an AWS config save: `success` when it applied cleanly, a
+/// warning naming any outside change it overrode, or the error.
+fn aws_save_status(
+    result: &std::result::Result<Vec<String>, SaveError>,
+    success: String,
+) -> (StatusLevel, String) {
+    match result {
+        Ok(overridden) if overridden.is_empty() => (StatusLevel::Success, success),
+        Ok(overridden) => (
+            StatusLevel::Warning,
+            format!(
+                "{}; overrode outside change to {}",
+                success,
+                overridden.join(", ")
+            ),
+        ),
+        Err(SaveError::Io(error)) => (StatusLevel::Error, format!("Save failed: {}", error)),
+        Err(error) => (StatusLevel::Error, error.to_string()),
+    }
+}
 
 impl ConfigManager {
     // ---- Browse mode ----
@@ -339,54 +361,40 @@ impl ConfigManager {
             None => return,
         };
 
-        match form.to_entry() {
-            Ok(entry) => {
-                if form.original_name.as_deref() != Some(entry.name.as_str())
-                    && self
-                        .aws_profiles
-                        .iter()
-                        .any(|profile| profile.name == entry.name)
-                {
-                    self.status = Some((
-                        StatusLevel::Error,
-                        format!("AWS profile '{}' already exists", entry.name),
-                    ));
-                    return;
-                }
-                let focus_name = entry.name.clone();
-                let mut updated_profiles = self.aws_profiles.clone();
-                // Check if rename
-                if let Some(ref original) = form.original_name {
-                    if original != &entry.name {
-                        updated_profiles.retain(|p| p.name != *original);
-                    }
-                }
-                // Update or insert
-                if let Some(existing) = updated_profiles.iter_mut().find(|p| p.name == entry.name) {
-                    *existing = entry;
-                } else {
-                    updated_profiles.push(entry);
-                }
-
-                if let Err(e) =
-                    save_aws_config(&updated_profiles, self.config.aws_config_path.as_deref())
-                {
-                    self.status = Some((StatusLevel::Error, format!("Save failed: {}", e)));
-                    return;
-                }
-
-                self.refresh_aws_list(&focus_name);
-                self.aws_form = None;
-                self.mode = Mode::Browse;
-                self.status = Some((
-                    StatusLevel::Success,
-                    format!("AWS profile '{}' saved", focus_name),
-                ));
-            }
+        let after = match form.to_entry() {
+            Ok(entry) => entry,
             Err(errors) => {
                 self.status = Some((StatusLevel::Error, errors.join("; ")));
+                return;
             }
+        };
+        let saved_name = after.name.clone();
+        let op = AwsProfileOp::Upsert {
+            before: form.original_entry().cloned(),
+            after,
+        };
+        let result = save_aws_config(&op, self.config.aws_config_path.as_deref());
+        // Reload after every attempt so the next save starts from the file.
+        let focus_name = match &result {
+            Ok(_) => saved_name.clone(),
+            Err(_) => self.selected_aws_name(),
+        };
+        self.refresh_aws_list(&focus_name);
+        if matches!(result, Ok(_) | Err(SaveError::Missing(_))) {
+            self.aws_form = None;
+            self.mode = Mode::Browse;
         }
+        self.status = Some(aws_save_status(
+            &result,
+            format!("AWS profile '{}' saved", saved_name),
+        ));
+    }
+
+    fn selected_aws_name(&self) -> String {
+        self.aws_profiles
+            .get(self.aws_selected)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_default()
     }
 
     fn refresh_aws_list(&mut self, focus_name: &str) {
@@ -449,17 +457,13 @@ impl ConfigManager {
 
         let profile_count = self.profile_names.len();
 
-        if self.link_picker_selected >= profile_count {
+        let mut after = aws_entry.clone();
+        let success = if self.link_picker_selected >= profile_count {
             // "Unlink" selected
-            if let Some(entry) = self.aws_profiles.get_mut(self.aws_selected) {
-                entry.credential_process = None;
-                entry.uses_awzars = false;
-                entry.awzars_profile = None;
-            }
-            self.status = Some((
-                StatusLevel::Success,
-                format!("Unlinked '{}'", aws_entry.name),
-            ));
+            after.credential_process = None;
+            after.uses_awzars = false;
+            after.awzars_profile = None;
+            format!("Unlinked '{}'", aws_entry.name)
         } else {
             // Link to selected awzars profile
             let awzars_name = match self.profile_names.get(self.link_picker_selected) {
@@ -473,26 +477,22 @@ impl ConfigManager {
                 format!("{} credential-process --profile {}", binary, awzars_name)
             };
 
-            if let Some(entry) = self.aws_profiles.get_mut(self.aws_selected) {
-                entry.credential_process = Some(cp);
-                entry.uses_awzars = true;
-                entry.awzars_profile = Some(awzars_name.clone());
-            }
-            self.status = Some((
-                StatusLevel::Success,
-                format!(
-                    "Linked '{}' → awzars profile '{}'",
-                    aws_entry.name, awzars_name
-                ),
-            ));
-        }
+            after.credential_process = Some(cp);
+            after.uses_awzars = true;
+            after.awzars_profile = Some(awzars_name.clone());
+            format!(
+                "Linked '{}' → awzars profile '{}'",
+                aws_entry.name, awzars_name
+            )
+        };
 
-        if let Err(e) = save_aws_config(&self.aws_profiles, self.config.aws_config_path.as_deref())
-        {
-            self.status = Some((StatusLevel::Error, format!("Save failed: {}", e)));
-        } else {
-            self.refresh_aws_list(&aws_entry.name);
-        }
+        let op = AwsProfileOp::Upsert {
+            before: Some(aws_entry.clone()),
+            after,
+        };
+        let result = save_aws_config(&op, self.config.aws_config_path.as_deref());
+        self.status = Some(aws_save_status(&result, success));
+        self.refresh_aws_list(&aws_entry.name);
 
         self.mode = Mode::Browse;
     }
@@ -607,18 +607,15 @@ impl ConfigManager {
                         }
                     }
                 } else {
-                    self.aws_profiles.retain(|p| p.name != target);
-                    if let Err(e) =
-                        save_aws_config(&self.aws_profiles, self.config.aws_config_path.as_deref())
-                    {
-                        self.status = Some((StatusLevel::Error, format!("Save failed: {}", e)));
-                    } else {
-                        self.refresh_aws_list_after_delete();
-                        self.status = Some((
-                            StatusLevel::Success,
-                            format!("AWS profile '{}' deleted", target),
-                        ));
-                    }
+                    let op = AwsProfileOp::Delete {
+                        name: target.clone(),
+                    };
+                    let result = save_aws_config(&op, self.config.aws_config_path.as_deref());
+                    self.status = Some(aws_save_status(
+                        &result,
+                        format!("AWS profile '{}' deleted", target),
+                    ));
+                    self.refresh_aws_list_after_delete();
                 }
                 self.mode = Mode::Browse;
             }

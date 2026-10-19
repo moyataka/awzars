@@ -209,12 +209,15 @@ mod tests {
             );
         let handle = CacheHandle::new(profile).expect("cache handle");
         handle.store(&creds).expect("cache store");
-        assert!(handle.get_valid_credentials().expect("cache get").is_some());
+        assert!(handle
+            .get_valid_credentials(3600)
+            .expect("cache get")
+            .is_some());
 
         let _warnings = invalidate_cached_credentials(profile);
 
         assert!(handle
-            .get_valid_credentials()
+            .get_valid_credentials(3600)
             .expect("cache get after invalidate")
             .is_none());
     }

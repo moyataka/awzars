@@ -1,5 +1,5 @@
-use super::AwsProfileEntry;
-use std::collections::{BTreeMap, HashMap};
+use super::{AwsProfileEntry, AwsProfileOp, SaveError};
+use std::collections::BTreeMap;
 
 enum Line<'a> {
     Header {
@@ -129,19 +129,26 @@ impl Section<'_> {
             .for_each(|line| output.push_str(line.raw()));
     }
 
-    fn write_profile(&self, entry: &AwsProfileEntry, newline: &str, output: &mut String) {
-        if matches!(self.name, SectionName::Profile(name) if name == entry.name) {
+    /// Write this section as profile `name` with the `desired` settings,
+    /// keeping the original text of every setting whose value is unchanged.
+    fn write_profile(
+        &self,
+        name: &str,
+        desired: &BTreeMap<String, String>,
+        newline: &str,
+        output: &mut String,
+    ) {
+        if matches!(self.name, SectionName::Profile(current) if current == name) {
             output.push_str(self.header);
         } else {
             let opening = self.header.find('[').expect("parsed section header");
             let closing = self.header.find(']').expect("parsed section header");
             output.push_str(&self.header[..opening]);
-            output.push_str(&profile_header(&entry.name));
+            output.push_str(&profile_header(name));
             output.push_str(&self.header[closing + 1..]);
         }
 
         let original = self.properties();
-        let desired = entry.properties();
         let mut preserve_continuations = true;
         for line in &self.lines {
             match line {
@@ -216,38 +223,94 @@ impl<'a> Document<'a> {
             })
     }
 
-    pub(super) fn update(&self, profiles: &[AwsProfileEntry]) -> String {
-        let mut remaining: HashMap<_, _> = profiles
-            .iter()
-            .map(|entry| (entry.source_name(), entry))
-            .collect();
-        let mut output = self.preamble.clone();
-        for section in &self.sections {
-            match section.name {
-                SectionName::Profile(name) => {
-                    if let Some(entry) = remaining.remove(name) {
-                        section.write_profile(entry, self.newline, &mut output);
-                    }
-                }
-                SectionName::Other => section.write_original(&mut output),
+    fn position(&self, profile: &str) -> Option<usize> {
+        self.sections.iter().position(
+            |section| matches!(section.name, SectionName::Profile(name) if name == profile),
+        )
+    }
+
+    /// Apply one change to this document. Every section other than the
+    /// target is written byte-for-byte; the target gets only the settings
+    /// that differ between `before` and `after`. Returns the new contents and
+    /// the settings whose outside change was overridden.
+    ///
+    /// With duplicate sections for a name, the first one is the target.
+    pub(super) fn apply(&self, op: &AwsProfileOp) -> Result<(String, Vec<String>), SaveError> {
+        let (target, after) = match op {
+            AwsProfileOp::Upsert { before, after } => (
+                before.as_ref().map(|before| before.name.as_str()),
+                Some(after),
+            ),
+            AwsProfileOp::Delete { name } => (Some(name.as_str()), None),
+        };
+        let target_index = target
+            .map(|name| {
+                self.position(name)
+                    .ok_or_else(|| SaveError::Missing(name.to_string()))
+            })
+            .transpose()?;
+        if let Some(after) = after {
+            if target != Some(after.name.as_str()) && self.position(&after.name).is_some() {
+                return Err(SaveError::Exists(after.name.clone()));
             }
         }
-        for entry in profiles
-            .iter()
-            .filter(|entry| remaining.contains_key(entry.source_name()))
+
+        let mut output = self.preamble.clone();
+        let mut overridden = Vec::new();
+        for (index, section) in self.sections.iter().enumerate() {
+            if Some(index) != target_index {
+                section.write_original(&mut output);
+            } else if let AwsProfileOp::Upsert {
+                before: Some(before),
+                after,
+            } = op
+            {
+                let original = before.properties();
+                let current = section.properties();
+                let mut desired = current.clone();
+                for (name, value) in changes(before, after) {
+                    if current.get(&name) != original.get(&name)
+                        && current.get(&name) != value.as_ref()
+                    {
+                        overridden.push(name.clone());
+                    }
+                    match value {
+                        Some(value) => desired.insert(name, value),
+                        None => desired.remove(&name),
+                    };
+                }
+                section.write_profile(&after.name, &desired, self.newline, &mut output);
+            }
+        }
+        if let AwsProfileOp::Upsert {
+            before: None,
+            after,
+        } = op
         {
             ensure_newline(&mut output, self.newline);
             if !output.is_empty() {
                 output.push_str(self.newline);
             }
-            output.push_str(&profile_header(&entry.name));
+            output.push_str(&profile_header(&after.name));
             output.push_str(self.newline);
-            for (name, value) in entry.properties() {
+            for (name, value) in after.properties() {
                 write_new_property(&name, &value, self.newline, &mut output);
             }
         }
-        output
+        Ok((output, overridden))
     }
+}
+
+/// Settings the TUI changed: new value, or `None` when it removed the setting.
+fn changes(before: &AwsProfileEntry, after: &AwsProfileEntry) -> BTreeMap<String, Option<String>> {
+    let before = before.properties();
+    let after = after.properties();
+    before
+        .keys()
+        .chain(after.keys())
+        .filter(|name| before.get(*name) != after.get(*name))
+        .map(|name| (name.clone(), after.get(name).cloned()))
+        .collect()
 }
 
 fn profile_header(name: &str) -> String {

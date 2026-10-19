@@ -17,8 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Browser: SAML is captured before console submission (#8); remembered sessions are reused and renewed on local logins (#13).
 - Credentials: refreshes are serialized across processes (#11) and happen before the SDK's advisory window (#12).
 - TUI: no panic when editing non-ASCII text (#7).
+- TUI: saving an AWS profile applies only that change to the current ~/.aws/config, keeping profiles and settings edited elsewhere while the TUI is open (#24).
 - CLI: `-q/--quiet` is honoured (#17); inline AI consent requires an interactive stderr (#14).
 - Docs: per-platform configuration paths (#19).
+- Credentials from short sessions (under 30 minutes) are reused from the cache instead of re-running the browser login on every call (#22).
 - Keychain read errors are reported instead of being treated as a missing entry, so existing keys are kept.
 - Session unlock tokens are tied to the profile's current password lock and to the current boot, and are cleared in every session when the lock changes or the profile is deleted. Run `awzars unlock` once after upgrading.
 
