@@ -23,22 +23,18 @@ target/x86_64-unknown-linux-musl/release/awzars
 cross build --release --target x86_64-unknown-linux-musl
 ```
 
-## Release
+## Releasing
 
-GitHub releases use the naming convention `awzars-v{version}-{target}.tar.gz`.
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. Don't build or upload release assets by hand.
 
-```bash
-# Package (example for x86_64 Linux musl)
-cd target/x86_64-unknown-linux-musl/release
-tar czf awzars-v1.0.1-x86_64-unknown-linux-musl.tar.gz awzars
+1. In a PR to `dev`, bump `version` in `Cargo.toml` and move `## [Unreleased]` in `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD`. The workflow uses that section as the release notes.
+2. Merge `dev` into `main`.
+3. On `main`: `git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`. The workflow fails if the tag doesn't match `Cargo.toml`, the commit isn't on `main`, the CHANGELOG section is missing, or a release for the tag already exists.
+4. Review the draft release (notes, `SHA256SUMS`, provenance attestations) and publish it.
 
-# Upload to existing tag
-gh release upload v1.0.1 /path/to/awzars-v1.0.1-x86_64-unknown-linux-musl.tar.gz
-```
-
-Current release targets:
-- `x86_64-unknown-linux-musl` — built on Linux with `cargo zigbuild`
-- `aarch64-apple-darwin` — built on macOS Apple Silicon
+Assets are named `awzars-vX.Y.Z-{target}.tar.gz` and contain only the `awzars` binary. Targets:
+- `x86_64-unknown-linux-musl`: built on Linux with `cargo zigbuild`
+- `aarch64-apple-darwin`: built on macOS Apple Silicon
 
 ## Usage
 
