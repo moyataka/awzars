@@ -28,6 +28,7 @@ pub struct RoleSelector {
     search_query: String,
     filtered_indices: Vec<usize>,
     layout_list_area: Rect,
+    notice: Option<String>,
 }
 
 impl RoleSelector {
@@ -45,7 +46,14 @@ impl RoleSelector {
             search_query: String::new(),
             filtered_indices,
             layout_list_area: Rect::default(),
+            notice: None,
         }
+    }
+
+    /// Show `notice` in the list title, e.g. why the selector opened.
+    pub fn with_notice(mut self, notice: impl Into<String>) -> Self {
+        self.notice = Some(notice.into());
+        self
     }
 
     /// Open TUI and let user select a role
@@ -164,12 +172,17 @@ impl RoleSelector {
             })
             .collect();
 
+        let mut title = format!(
+            "Select Role ({}/{})",
+            self.filtered_indices.len(),
+            self.roles.len()
+        );
+        if let Some(notice) = &self.notice {
+            title.push_str(" · ");
+            title.push_str(notice);
+        }
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(format!(
-                "Select Role ({}/{})",
-                self.filtered_indices.len(),
-                self.roles.len()
-            )))
+            .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(
                 Style::default()
                     .bg(Color::DarkGray)

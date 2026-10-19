@@ -39,6 +39,18 @@ pub enum AwzarsError {
     #[error("No roles available in SAML assertion")]
     NoRolesAvailable,
 
+    /// The requested role is absent from the SAML assertion, typically
+    /// because it was renamed or removed on the identity-provider side.
+    #[error("{}", role_not_in_assertion_message(.profile, .role_arn, .suggestions, .available))]
+    RoleNotInAssertion {
+        profile: String,
+        role_arn: String,
+        /// The closest available roles, best first.
+        suggestions: Vec<String>,
+        /// How many roles the assertion offers in total.
+        available: usize,
+    },
+
     #[error("Credential expired")]
     CredentialExpired,
 
@@ -111,3 +123,30 @@ impl From<toml::ser::Error> for AwzarsError {
 }
 
 pub type Result<T> = std::result::Result<T, AwzarsError>;
+
+fn role_not_in_assertion_message(
+    profile: &str,
+    role_arn: &str,
+    suggestions: &[String],
+    available: &usize,
+) -> String {
+    let mut message = format!(
+        "Role {role_arn} is not in the SAML assertion for profile '{profile}' \
+         (it may have been renamed or removed)."
+    );
+    if !suggestions.is_empty() {
+        message.push_str(&format!("\nClosest of {available} available role(s):"));
+        for suggestion in suggestions {
+            message.push_str(&format!("\n  {suggestion}"));
+        }
+    }
+    message.push_str(&format!(
+        "\n\nFix it one of two ways:\n  \
+         1. Run an interactive login: `awzars login --profile {profile}` \
+         — pick a role from the list and save it to the profile.\n  \
+         2. Set it manually: `awzars configure --profile {profile} \
+         --role-arn arn:aws:iam::<account>:role/<name>`.\n\
+         List every available role with `awzars list-roles --profile {profile}`."
+    ));
+    message
+}
