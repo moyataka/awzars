@@ -316,7 +316,70 @@ pub fn process_start_time(pid: u32) -> Option<u64> {
     ProcStat::read(pid).map(|stat| stat.start_time)
 }
 
-#[cfg(not(target_os = "linux"))]
+/// The `proc_bsdinfo` fields the lock needs, read via
+/// `proc_pidinfo(PROC_PIDTBSDINFO)` — macOS has no `/proc`, but this one call
+/// yields the same ppid / controlling-tty / start-time triple.
+#[cfg(target_os = "macos")]
+struct ProcStat {
+    ppid: u32,
+    /// Controlling tty device; `NODEV` (`(dev_t)-1`) when there is none.
+    tty_dev: u32,
+    /// Start time in microseconds since the epoch.
+    start_time: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl ProcStat {
+    const NODEV: u32 = u32::MAX;
+
+    fn read(pid: u32) -> Option<ProcStat> {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: `info` is a correctly sized, writable buffer for the
+        // PROC_PIDTBSDINFO flavour; the return value is checked below before
+        // the struct is read.
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if n != size {
+            return None;
+        }
+        // SAFETY: proc_pidinfo filled all `size` bytes.
+        let info = unsafe { info.assume_init() };
+        Some(ProcStat {
+            ppid: info.pbi_ppid,
+            tty_dev: info.e_tdev,
+            start_time: info
+                .pbi_start_tvsec
+                .saturating_mul(1_000_000)
+                .saturating_add(info.pbi_start_tvusec),
+        })
+    }
+
+    fn has_tty(&self) -> bool {
+        self.tty_dev != Self::NODEV && self.tty_dev != 0
+    }
+}
+
+/// macOS: session-leader start time (µs since the epoch) — same PID-reuse
+/// defence as the Linux variant, just a different clock. Tokens are only ever
+/// compared against values from the same host, so the unit never mixes.
+///
+/// Best-effort: `proc_pidinfo` refuses processes owned by another user, and a
+/// Terminal/Ghostty session leader is usually root-owned `login`, so this is
+/// often `None` (no extra check — the pre-macOS-support behaviour).
+#[cfg(target_os = "macos")]
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    ProcStat::read(pid).map(|stat| stat.start_time)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn process_start_time(_pid: u32) -> Option<u64> {
     None
 }
@@ -374,7 +437,62 @@ pub fn terminal_session_sid() -> Result<u32> {
     Ok(sid)
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS variant of the ancestry walk. `proc_bsdinfo` carries no session id,
+/// so the tty-owning ancestor's session comes from `getsid(pid)`.
+#[cfg(target_os = "macos")]
+pub fn terminal_session_sid() -> Result<u32> {
+    use nix::unistd::{getsid, Pid};
+    let mut pid = std::process::id();
+    for hop in 0..SESSION_WALK_MAX_HOPS {
+        let Some(stat) = ProcStat::read(pid) else {
+            tracing::debug!(
+                pid,
+                hop,
+                "terminal_session_sid: proc_pidinfo failed; falling back to getsid(0)"
+            );
+            break;
+        };
+        if stat.has_tty() {
+            match getsid(Some(Pid::from_raw(pid as i32))) {
+                Ok(sid) => {
+                    let sid = sid.as_raw() as u32;
+                    tracing::debug!(
+                        pid,
+                        hop,
+                        sid,
+                        tty_dev = stat.tty_dev,
+                        "terminal_session_sid: resolved via TTY-owning ancestor"
+                    );
+                    return Ok(sid);
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        pid,
+                        hop,
+                        error = %e,
+                        "terminal_session_sid: getsid failed; falling back to getsid(0)"
+                    );
+                    break;
+                }
+            }
+        }
+        if stat.ppid <= 1 {
+            tracing::debug!(
+                pid,
+                hop,
+                "terminal_session_sid: reached launchd with no TTY ancestor; \
+                 falling back to getsid(0)"
+            );
+            break;
+        }
+        pid = stat.ppid;
+    }
+    let sid = current_sid()?;
+    tracing::debug!(sid, "terminal_session_sid: using raw getsid(0)");
+    Ok(sid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn terminal_session_sid() -> Result<u32> {
     let sid = current_sid()?;
     tracing::debug!(sid, "terminal_session_sid: using raw getsid(0)");
@@ -1132,7 +1250,7 @@ mod tests {
         let _ = remove_unlock(&prof);
 
         let token = write_unlock(&prof, 3600, false, true).unwrap();
-        // On Linux we must capture a start_time; on other platforms it's None.
+        // On Linux we must capture a start_time; elsewhere it's best-effort.
         if cfg!(target_os = "linux") {
             assert!(
                 token.start_time.is_some(),
@@ -1144,8 +1262,9 @@ mod tests {
 
     #[test]
     fn unlock_token_with_mismatched_start_time_is_rejected() {
-        // Skip on non-Linux: process_start_time always returns None there
-        // so the mismatch branch is unreachable.
+        // Skip on non-Linux: process_start_time may return None there
+        // (always, or for a root-owned session leader on macOS), making the
+        // mismatch branch unreachable.
         if !cfg!(target_os = "linux") {
             return;
         }
@@ -1268,6 +1387,15 @@ mod tests {
             ..Profile::default()
         };
         assert!(effective_markers(&p).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_proc_stat_reads_self() {
+        let stat = ProcStat::read(std::process::id()).expect("proc_pidinfo on self");
+        assert_eq!(stat.ppid, nix::unistd::getppid().as_raw() as u32);
+        assert!(stat.start_time > 0);
+        assert!(ProcStat::read(u32::MAX >> 1).is_none());
     }
 
     #[test]
