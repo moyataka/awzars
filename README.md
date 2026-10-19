@@ -415,6 +415,7 @@ For wrappers and shell scripts:
 | `8` | AI agent context detected without consent |
 | `9` | Password verification failed |
 | `10` | Lock operation needed a TTY but stdin isn't one |
+| `11` | Session unlock unavailable: the current boot session cannot be identified |
 
 ## Remote Chrome
 

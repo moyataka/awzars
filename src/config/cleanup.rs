@@ -63,12 +63,12 @@ pub fn delete_awzars_profile(name: &str) -> Result<ProfileDeletionReport> {
         warnings.push(format!("cache: {}", e));
     }
 
-    // Drop any session unlock/consent token for this profile. Best-effort:
-    // the verifier is already gone (with the profile entry), so an orphaned
-    // token would be inert — but we clean it up so `lock::gc_stale_unlocks`
-    // does not have to.
-    if let Err(e) = crate::auth::lock::remove_unlock(name) {
-        warnings.push(format!("session unlock token: {}", e));
+    // Drop the profile's session unlock/consent tokens and failed-attempt
+    // counters in every session scope, so a profile later created under the
+    // same name starts with none. Best-effort: a token minted under a
+    // password lock stays bound to that lock's verifier even if left behind.
+    if let Err(e) = crate::auth::lock::revoke_all_unlocks(name) {
+        warnings.push(format!("session unlock tokens: {}", e));
     }
 
     let orphaned_aws_profiles = linked_aws_profiles(&config, name);

@@ -90,6 +90,12 @@ pub enum AwzarsError {
          AWZARS_REFRESH_LOCK_TIMEOUT_SECS."
     )]
     RefreshLockTimeout { profile: String, waited_secs: u128 },
+
+    #[error(
+        "Cannot determine the current boot session; session unlock is \
+         unavailable in this environment."
+    )]
+    SessionUnlockUnavailable,
 }
 
 impl From<toml::de::Error> for AwzarsError {

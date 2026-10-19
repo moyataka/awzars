@@ -44,7 +44,7 @@ pub fn run(profile_name: &str, remove: bool, quiet: bool) -> Result<()> {
         profile.lock_ttl_hours = None;
         profile.lock_ai_markers = None;
         config.save()?;
-        let _ = lock::remove_unlock(profile_name);
+        revoke_session_tokens(profile_name);
         if !quiet {
             println!("Password lock removed from profile '{}'.", profile_name);
         }
@@ -68,9 +68,10 @@ pub fn run(profile_name: &str, remove: bool, quiet: bool) -> Result<()> {
     profile.lock_verifier = Some(phc);
     config.save()?;
 
-    // Changing the password invalidates any existing session token: callers
-    // must re-unlock with the new secret.
-    let _ = lock::remove_unlock(profile_name);
+    // Setting or changing the password ends every session's unlock: tokens
+    // are bound to the previous verifier, and are also removed in every
+    // session scope here. Callers must re-unlock with the new secret.
+    revoke_session_tokens(profile_name);
 
     if !quiet {
         println!(
@@ -80,4 +81,17 @@ pub fn run(profile_name: &str, remove: bool, quiet: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Best-effort removal of the profile's session tokens in every scope. A
+/// failure is logged rather than returned: the lock change is already saved,
+/// and the old tokens no longer match the profile's verifier.
+fn revoke_session_tokens(profile_name: &str) {
+    if let Err(e) = lock::revoke_all_unlocks(profile_name) {
+        tracing::warn!(
+            profile = profile_name,
+            error = %e,
+            "could not remove every session unlock token"
+        );
+    }
 }

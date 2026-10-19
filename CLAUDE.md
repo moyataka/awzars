@@ -242,7 +242,7 @@ Schema additions on `Profile` (all `Option<_>`, omitted when unset): `lock_verif
 - Ephemeral `--user-data-dir` with `tempfile::TempDir` auto-cleanup (non-remember-me sessions)
 - SAML client-side validation: issuer (URL-normalized), audience, Recipient, time window (30s skew), inverted-time-window rejection. **No XML-DSIG verification client-side** — integrity is delegated to TLS-to-Azure plus AWS STS re-verification in `AssumeRoleWithSAML`.
 - Error messages redacted to avoid leaking tenant IDs, issuer URLs, or Recipient values
-- 100% safe Rust (no `unsafe` blocks)
+- Safe Rust except for small, `SAFETY`-commented macOS FFI calls in `auth/lock.rs` (`proc_pidinfo`, `sysctlbyname`)
 - CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `clippy -D warnings`, tests, `cargo deny check`, `cargo audit` on every PR
 
 ## Configuration
