@@ -5,7 +5,7 @@
 //! browser-based login flow.
 
 pub mod pipeline;
-mod refresh_lock;
+pub(crate) mod refresh_lock;
 
 pub use pipeline::try_load_credentials;
-pub use refresh_lock::CredentialRefreshGuard;
+pub use refresh_lock::{refresh_under_lock, CredentialRefreshGuard};

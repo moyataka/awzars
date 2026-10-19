@@ -2,6 +2,7 @@
 
 use crate::auth::aws::sts::exchange_saml_for_credentials;
 use crate::auth::azure::saml::SamlAssertion;
+use crate::auth::credentials::CredentialRefreshGuard;
 use crate::browser::chromium::AzureLoginBrowser;
 use crate::cli::args::{Args, LoginArgs, OutputFormat};
 use crate::config::{self, Config};
@@ -81,6 +82,19 @@ pub struct LoginOutcome {
 
 /// Perform the login flow: browser → SAML → role selection → STS → return credentials.
 pub async fn perform_login(params: &LoginParams) -> Result<LoginOutcome> {
+    let sign_in = sign_in(params).await?;
+    let role_arn = pick_role(&sign_in.assertion, params.role_arn.as_deref())?;
+    exchange_for_credentials(params, &sign_in, role_arn).await
+}
+
+/// A completed browser sign-in: the raw SAML response and its parsed form.
+struct SamlSignIn {
+    response: zeroize::Zeroizing<String>,
+    assertion: SamlAssertion,
+}
+
+/// Drive the browser through Azure AD and parse the resulting SAML assertion.
+async fn sign_in(params: &LoginParams) -> Result<SamlSignIn> {
     let mut browser = launch_browser_for_login(params).await?;
 
     // Extract SAML then close the browser immediately — avoids spurious CDP
@@ -88,14 +102,29 @@ pub async fn perform_login(params: &LoginParams) -> Result<LoginOutcome> {
     // alongside the terminal TUI selector.
     let saml_result = authenticate(&mut browser, params).await;
     browser.shutdown().await;
-    let saml_response = saml_result?;
+    let response = saml_result?;
 
-    let assertion = SamlAssertion::parse(&saml_response, &params.tenant_id, &params.app_id_uri)?;
-    let (role_arn, principal_arn) = select_role(&assertion, params.role_arn.as_deref())?;
+    let assertion = SamlAssertion::parse(&response, &params.tenant_id, &params.app_id_uri)?;
+    Ok(SamlSignIn {
+        response,
+        assertion,
+    })
+}
+
+/// Exchange the SAML assertion for credentials of `role_arn` via STS.
+async fn exchange_for_credentials(
+    params: &LoginParams,
+    sign_in: &SamlSignIn,
+    role_arn: String,
+) -> Result<LoginOutcome> {
+    let principal_arn = sign_in
+        .assertion
+        .principal_for_role(&role_arn)
+        .ok_or_else(|| AwzarsError::Saml(format!("Principal not found for role: {}", role_arn)))?;
 
     tracing::info!("Exchanging SAML assertion for AWS credentials");
     let credentials = exchange_saml_for_credentials(
-        &saml_response,
+        &sign_in.response,
         &role_arn,
         &principal_arn,
         params.session_duration,
@@ -177,31 +206,27 @@ async fn authenticate(
     Ok(saml_response)
 }
 
-/// Resolve `(role_arn, principal_arn)` from the SAML assertion.
+/// Resolve the role ARN to use from the SAML assertion.
 ///
-/// If the caller supplied an explicit role override, validate that the
-/// assertion has a matching principal for it. Otherwise fall back to the
-/// interactive TUI role selector (auto-selects when only one role is
-/// available).
-fn select_role(assertion: &SamlAssertion, role_override: Option<&str>) -> Result<(String, String)> {
-    let role_arn = match role_override {
-        Some(r) => r.to_string(),
-        None => {
-            let roles = assertion.roles();
-            if roles.is_empty() {
-                return Err(AwzarsError::NoRolesAvailable);
-            }
-            RoleSelector::new(roles)
-                .select()?
-                .ok_or(AwzarsError::NoRolesAvailable)?
-        }
-    };
+/// An explicit role override wins (its principal is checked during the STS
+/// exchange). Otherwise fall back to the interactive TUI role selector
+/// (auto-selects when only one role is available).
+fn pick_role(assertion: &SamlAssertion, role_override: Option<&str>) -> Result<String> {
+    if let Some(role) = role_override {
+        return Ok(role.to_string());
+    }
+    let roles = assertion.roles();
+    if roles.is_empty() {
+        return Err(AwzarsError::NoRolesAvailable);
+    }
+    RoleSelector::new(roles)
+        .select()?
+        .ok_or(AwzarsError::NoRolesAvailable)
+}
 
-    let principal_arn = assertion
-        .principal_for_role(&role_arn)
-        .ok_or_else(|| AwzarsError::Saml(format!("Principal not found for role: {}", role_arn)))?;
-
-    Ok((role_arn, principal_arn))
+/// Whether `pick_role` will wait for a human in the TUI selector.
+fn role_pick_is_interactive(assertion: &SamlAssertion, role_override: Option<&str>) -> bool {
+    role_override.is_none() && assertion.roles().len() > 1
 }
 
 /// Write fresh credentials to both the in-process cache and the OS
@@ -232,25 +257,13 @@ pub async fn execute(args: &Args) -> Result<()> {
     // ask every invocation.
     crate::auth::lock::enforce(&args.profile, profile, true, login_args.session_remember)?;
 
-    let _refresh_guard =
-        crate::auth::credentials::CredentialRefreshGuard::acquire(&args.profile).await?;
+    // A cache hit needs neither the refresh lock nor any prompt, so it never
+    // waits behind another process's browser sign-in (#23).
     let credential_scope = CredentialScope::for_login(&login_args);
-    if let Some(creds) = credential_scope.load(
-        &args.profile,
-        profile.azure.session_duration,
-        login_args.refresh_requested(),
-    )? {
-        if login_args.credential_process {
-            write_credentials_json(&creds)?;
-            return Ok(());
-        }
-        print_credentials(
-            &creds,
-            login_args.output,
-            login_args.show_secrets,
-            args.quiet,
-        )?;
-        return Ok(());
+    let session_duration = profile.azure.session_duration;
+    let force_refresh = login_args.refresh_requested();
+    if let Some(creds) = credential_scope.load(&args.profile, session_duration, force_refresh)? {
+        return output_credentials(&creds, &login_args, args.quiet);
     }
 
     // Build Azure configuration (allow CLI overrides)
@@ -263,7 +276,8 @@ pub async fn execute(args: &Args) -> Result<()> {
         .as_ref()
         .unwrap_or(&profile.azure.app_id_uri);
 
-    // Resolve remember_me: CLI flag > profile config > prompt
+    // Resolve remember_me: CLI flag > profile config > prompt. The prompt runs
+    // before the refresh lock is taken so it never blocks other refreshes.
     let remember_me = if login_args.remember_me {
         true
     } else if let Some(rm) = profile.remember_me {
@@ -302,7 +316,56 @@ pub async fn execute(args: &Args) -> Result<()> {
         allow_insecure_remote_chrome: login_args.allow_insecure_remote_chrome,
     };
 
-    let outcome = perform_login(&params).await?;
+    // Profile scope re-checks stored credentials once it holds the lock.
+    // Identity overrides (request scope) never read or write them, but still
+    // hold the lock through the browser phase: it reads and may rotate the
+    // profile's cookie keystore, a read-modify-write that must not interleave.
+    let mut refresh_guard = Some(match credential_scope {
+        CredentialScope::Profile => {
+            let (guard, refreshed) =
+                lock_and_recheck(&args.profile, session_duration, force_refresh).await?;
+            if let Some(creds) = refreshed {
+                return output_credentials(&creds, &login_args, args.quiet);
+            }
+            guard
+        }
+        CredentialScope::Request => CredentialRefreshGuard::acquire(&args.profile).await?,
+    });
+
+    let sign_in = sign_in(&params).await?;
+    if credential_scope == CredentialScope::Request {
+        drop(refresh_guard.take());
+    }
+    let role_arn = if role_pick_is_interactive(&sign_in.assertion, params.role_arn.as_deref()) {
+        // Never hold the lock while a human picks a role: every other refresh
+        // of this profile would wait on the selector (#23).
+        drop(refresh_guard.take());
+        let role_arn = pick_role(&sign_in.assertion, None)?;
+        if credential_scope == CredentialScope::Profile {
+            let (guard, refreshed) =
+                lock_and_recheck(&args.profile, session_duration, force_refresh).await?;
+            if let Some(creds) = refreshed {
+                // Another login stored credentials while the role was being
+                // chosen. Reuse them when they are for the same role; otherwise
+                // the explicit choice made here replaces them, visibly.
+                let configured = configured_role(&args.profile)?;
+                if reuse_after_role_pick(configured.as_deref(), &role_arn) {
+                    return output_credentials(&creds, &login_args, args.quiet);
+                }
+                tracing::warn!(
+                    "Another awzars login stored credentials for profile '{}' while the \
+                     role was being chosen; replacing them with the chosen role",
+                    args.profile
+                );
+            }
+            refresh_guard = Some(guard);
+        }
+        role_arn
+    } else {
+        pick_role(&sign_in.assertion, params.role_arn.as_deref())?
+    };
+
+    let outcome = exchange_for_credentials(&params, &sign_in, role_arn).await?;
     credential_scope.persist(&outcome.credentials, &args.profile)?;
 
     // Save the interactively-picked role so subsequent non-interactive
@@ -313,19 +376,45 @@ pub async fn execute(args: &Args) -> Result<()> {
         }
     }
 
-    // Output
-    if login_args.credential_process {
-        write_credentials_json(&outcome.credentials)?;
-    } else {
-        print_credentials(
-            &outcome.credentials,
-            login_args.output,
-            login_args.show_secrets,
-            args.quiet,
-        )?;
-    }
-
+    output_credentials(&outcome.credentials, &login_args, args.quiet)?;
+    drop(refresh_guard);
     Ok(())
+}
+
+/// Take the profile's refresh lock, then re-check stored credentials: another
+/// process may have refreshed them while this one prompted or waited.
+async fn lock_and_recheck(
+    profile: &str,
+    session_duration: i32,
+    force_refresh: bool,
+) -> Result<(CredentialRefreshGuard, Option<CredentialProcessOutput>)> {
+    let guard = CredentialRefreshGuard::acquire(profile).await?;
+    let stored = CredentialScope::Profile.load(profile, session_duration, force_refresh)?;
+    Ok((guard, stored))
+}
+
+/// Whether credentials another login stored while this one's role was being
+/// picked can be reused: only when the profile is now configured for the
+/// same role. Otherwise the role picked here replaces them.
+fn reuse_after_role_pick(configured_role: Option<&str>, picked_role: &str) -> bool {
+    configured_role == Some(picked_role)
+}
+
+/// The role ARN currently saved in the profile's configuration.
+fn configured_role(profile_name: &str) -> Result<Option<String>> {
+    Ok(Config::load()?.get_profile(profile_name)?.role_arn.clone())
+}
+
+fn output_credentials(
+    creds: &CredentialProcessOutput,
+    login_args: &LoginArgs,
+    quiet: bool,
+) -> Result<()> {
+    if login_args.credential_process {
+        write_credentials_json(creds)?;
+        return Ok(());
+    }
+    print_credentials(creds, login_args.output, login_args.show_secrets, quiet)
 }
 
 /// Save `role_arn` into the named profile in the configured `config.toml`.
@@ -474,6 +563,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn cached_login_does_not_wait_for_the_refresh_lock() {
+        use crate::auth::credentials::refresh_lock::test_support;
+        use clap::Parser;
+        if let Ok(directory) = std::env::var(test_support::CHILD_DIRECTORY_ENV) {
+            test_support::prepare_cached_default_profile(&directory);
+            let arguments = ["awzars", "login", "--credential-process"];
+            execute(&Args::try_parse_from(arguments).unwrap())
+                .await
+                .unwrap();
+            return;
+        }
+        let output = test_support::run_child_while_lock_held(
+            "cli::commands::login::tests::cached_login_does_not_wait_for_the_refresh_lock",
+        );
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("\"Version\""));
+    }
+
     fn login_arguments() -> LoginArgs {
         LoginArgs {
             azure_tenant: None,
@@ -550,6 +663,17 @@ mod tests {
         );
         assert!(scope.load(&profile, 3600, true).unwrap().is_none());
         cache.clear().unwrap();
+    }
+
+    #[test]
+    fn role_pick_recheck_reuses_only_credentials_for_the_picked_role() {
+        let picked = "arn:aws:iam::123456789012:role/Picked";
+        assert!(reuse_after_role_pick(Some(picked), picked));
+        assert!(!reuse_after_role_pick(
+            Some("arn:aws:iam::123456789012:role/Other"),
+            picked
+        ));
+        assert!(!reuse_after_role_pick(None, picked));
     }
 
     #[test]
