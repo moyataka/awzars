@@ -17,7 +17,9 @@
 //!
 //! The unlock token is a short JSON blob written under
 //! `$XDG_RUNTIME_DIR/awzars/sessions/` (mode 0o600), so it is automatically
-//! reaped on logout (tmpfs).
+//! reaped on logout (tmpfs). A token is bound to the profile's current lock
+//! verifier and to the current boot (`current_boot_id`); where the boot cannot
+//! be identified, session unlock is unavailable rather than unbound.
 //!
 //! AI marker check is best-effort — an agent that strips its env defeats it.
 //! The strong AI defense lives in the AI tool's own permission system
@@ -28,6 +30,7 @@ use crate::error::{AwzarsError, Result};
 use serde::{Deserialize, Serialize};
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
@@ -636,6 +639,77 @@ fn session_scope() -> Result<SessionScope> {
     Ok(SessionScope::Sid(terminal_session_sid()?))
 }
 
+// --- Boot binding ---
+
+/// A boot id is a dashed UUID: 36 characters of hex digits and `-`.
+const BOOT_ID_LEN: usize = 36;
+
+fn is_well_formed_boot_id(id: &str) -> bool {
+    id.len() == BOOT_ID_LEN && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+}
+
+/// Linux: the kernel's per-boot random UUID.
+#[cfg(target_os = "linux")]
+fn read_boot_id() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|raw| raw.trim().to_string())
+}
+
+/// macOS: `kern.bootsessionuuid`, a UUID generated at each boot.
+#[cfg(target_os = "macos")]
+fn read_boot_id() -> Option<String> {
+    const NAME: &[u8] = b"kern.bootsessionuuid\0";
+    let mut buf = [0u8; 64];
+    let mut len: libc::size_t = buf.len();
+    // SAFETY: `NAME` is NUL-terminated; `buf` is writable for `len` bytes and
+    // the kernel writes at most `len` bytes, storing the written size back in
+    // `len` (checked against the buffer below). No new value is set.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            NAME.as_ptr().cast(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len > buf.len() {
+        return None;
+    }
+    let raw = buf[..len].split(|&b| b == 0).next()?;
+    std::str::from_utf8(raw)
+        .ok()
+        .map(|id| id.trim().to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_boot_id() -> Option<String> {
+    None
+}
+
+/// Identifier of the current boot, read once per process. `None` when the
+/// platform offers none or the value is not a well-formed UUID; session
+/// unlock is then unavailable (see `require_boot_id`).
+pub fn current_boot_id() -> Option<&'static str> {
+    static BOOT_ID: OnceLock<Option<String>> = OnceLock::new();
+    BOOT_ID
+        .get_or_init(|| read_boot_id().filter(|id| is_well_formed_boot_id(id)))
+        .as_deref()
+}
+
+/// Unwrap a boot id, failing closed: without one, no token is minted or
+/// honoured.
+fn require_boot_id(boot: Option<&str>) -> Result<&str> {
+    boot.ok_or(AwzarsError::SessionUnlockUnavailable)
+}
+
+/// `Ok` if session unlock tokens can be used on this host. Lets `unlock`
+/// refuse before prompting for anything.
+pub fn ensure_session_unlock_available() -> Result<()> {
+    require_boot_id(current_boot_id()).map(|_| ())
+}
+
 // --- Unlock token storage ---
 
 /// Where session unlock tokens live. Prefers `$XDG_RUNTIME_DIR/awzars/sessions/`
@@ -668,10 +742,37 @@ fn token_path(scope: &SessionScope, profile: &str) -> Result<PathBuf> {
     Ok(unlock_dir()?.join(format!("{}-{}.json", scope.key(), profile)))
 }
 
+/// Token format version written by this build. Tokens with a lower version
+/// predate the lock-verifier binding and are never honoured.
+const UNLOCK_TOKEN_VERSION: u8 = 2;
+
+/// Domain-separation prefix for `verifier_fingerprint`.
+const VERIFIER_FP_DOMAIN: &[u8] = b"awzars-unlock-verifier-v1\0";
+
+/// Fingerprint of a profile's lock verifier (PHC string), stored in a token so
+/// it only counts while the profile still holds the verifier it was minted
+/// under. Truncated SHA-256 (128 bits) in hex: an equality tag, not a secret.
+fn verifier_fingerprint(phc: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(VERIFIER_FP_DOMAIN);
+    hasher.update(phc.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .take(16)
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
 /// In-session approval record. Existence (under the current SID) means the
 /// terminal session has cleared the gate for this profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnlockToken {
+    /// Token format version (`UNLOCK_TOKEN_VERSION`). Absent (`0`) in tokens
+    /// written by older builds, which are rejected on read.
+    #[serde(default)]
+    pub v: u8,
     pub profile: String,
     /// Type-tagged session-scope key (`sid-<n>` or `env-<key>`) this token is
     /// bound to. Compared verbatim against the current scope on read.
@@ -692,6 +793,16 @@ pub struct UnlockToken {
     /// degrades to scope-key + TTL, matching pre-fix behaviour.
     #[serde(default)]
     pub start_time: Option<u64>,
+    /// `verifier_fingerprint` of the profile's lock verifier when the token
+    /// was minted; `None` if the profile had no password lock. `enforce`
+    /// requires it to match the profile's current verifier, so a token stops
+    /// counting once the lock is set, changed or removed.
+    #[serde(default)]
+    pub verifier_fp: Option<String>,
+    /// `current_boot_id` when the token was minted. A token is only honoured
+    /// within the same boot; GC removes tokens from other boots.
+    #[serde(default)]
+    pub boot_id: Option<String>,
 }
 
 impl UnlockToken {
@@ -713,15 +824,39 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Persist an unlock/consent token for the current session.
+/// Persist an unlock/consent token for the current session. `verifier` is the
+/// profile's current `lock_verifier` (`None` for an unlocked profile); the
+/// token is bound to it and to the current boot. Fails with
+/// `SessionUnlockUnavailable` when the boot cannot be identified.
 pub fn write_unlock(
     profile: &str,
     ttl_secs: u64,
     allow_ai: bool,
     password_unlocked: bool,
+    verifier: Option<&str>,
 ) -> Result<UnlockToken> {
+    write_unlock_in_boot(
+        profile,
+        ttl_secs,
+        allow_ai,
+        password_unlocked,
+        verifier,
+        current_boot_id(),
+    )
+}
+
+fn write_unlock_in_boot(
+    profile: &str,
+    ttl_secs: u64,
+    allow_ai: bool,
+    password_unlocked: bool,
+    verifier: Option<&str>,
+    boot: Option<&str>,
+) -> Result<UnlockToken> {
+    let boot = require_boot_id(boot)?;
     let scope = session_scope()?;
     let token = UnlockToken {
+        v: UNLOCK_TOKEN_VERSION,
         profile: profile.to_string(),
         scope_key: scope.key(),
         created_at: now_unix(),
@@ -729,6 +864,8 @@ pub fn write_unlock(
         allow_ai,
         password_unlocked,
         start_time: scope.start_time(),
+        verifier_fp: verifier.map(verifier_fingerprint),
+        boot_id: Some(boot.to_string()),
     };
     let path = token_path(&scope, profile)?;
     let bytes = serde_json::to_vec(&token)?;
@@ -737,13 +874,29 @@ pub fn write_unlock(
 }
 
 /// Load the current session's unlock token for `profile`, if it exists, the
-/// SID matches, and it has not expired.
+/// SID matches, it was minted in the current boot, and it has not expired.
 pub fn read_valid_unlock(profile: &str) -> Option<UnlockToken> {
+    read_valid_unlock_in_boot(profile, current_boot_id())
+}
+
+fn read_valid_unlock_in_boot(profile: &str, boot: Option<&str>) -> Option<UnlockToken> {
+    // No boot id: nothing can be checked, so nothing is honoured.
+    let boot = boot?;
     let scope = session_scope().ok()?;
     let path = token_path(&scope, profile).ok()?;
     let bytes = std::fs::read(&path).ok()?;
     let token: UnlockToken = serde_json::from_slice(&bytes).ok()?;
     if token.scope_key != scope.key() || token.profile != profile {
+        return None;
+    }
+    // Tokens from an older format carry no lock binding; never honour them.
+    if token.v < UNLOCK_TOKEN_VERSION {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    // Minted in another boot (or without a boot id): never honoured.
+    if token.boot_id.as_deref() != Some(boot) {
+        let _ = std::fs::remove_file(&path);
         return None;
     }
     // PID-reuse defence (sid- scope only): if the token recorded a
@@ -774,6 +927,58 @@ pub fn remove_unlock(profile: &str) -> Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+/// The profile a `<scope_key>-<profile>` file stem belongs to, or `None` when
+/// the stem does not start with a well-formed scope key. Scope values are
+/// `-`-free, so the split is unambiguous: `env-x-a-b` is profile `a-b`, never
+/// `b`.
+fn profile_from_stem(stem: &str) -> Option<&str> {
+    let key = scope_key_from_stem(stem)?;
+    SessionScope::from_key(&key)?;
+    stem.get(key.len() + 1..)
+        .filter(|profile| !profile.is_empty())
+}
+
+/// Remove every session token (unlock and AI consent) and failed-attempt
+/// counter for `profile`, across all session scopes. Called when the
+/// profile's lock is set, changed or removed and when the profile is deleted,
+/// so no session keeps access granted under the previous state.
+///
+/// Only regular files named exactly `<scope_key>-<profile>.json` / `.fails`
+/// are removed; symlinks, directories and unrecognised names are left alone.
+/// Attempts every match and returns the first removal error, if any.
+pub fn revoke_all_unlocks(profile: &str) -> Result<()> {
+    let dir = unlock_dir()?;
+    let mut first_err = None;
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        // `DirEntry::file_type` does not follow symlinks.
+        if !entry.file_type().is_ok_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(stem) = name
+            .strip_suffix(".json")
+            .or_else(|| name.strip_suffix(".fails"))
+        else {
+            continue;
+        };
+        if profile_from_stem(stem) != Some(profile) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e.into()),
+        None => Ok(()),
     }
 }
 
@@ -815,8 +1020,13 @@ fn scope_key_from_stem(stem: &str) -> Option<String> {
 ///
 /// where `<scope_key>` is `sid-<n>` or `env-<key>`. A `sid-` scope is reaped
 /// when its session leader dies; an `env-` scope only ages out. Tokens are
-/// also reaped on TTL expiry; failure counters on age-out.
+/// also reaped on TTL expiry or when minted in another boot (or without a
+/// boot id); failure counters on age-out only.
 pub fn gc_stale_unlocks() {
+    gc_stale_unlocks_in_boot(current_boot_id());
+}
+
+fn gc_stale_unlocks_in_boot(boot: Option<&str>) {
     /// Hard cap on bytes read from any session-dir file during GC. Real
     /// tokens and failure counters are tens of bytes; an unbounded read
     /// would let a same-UID actor plant a multi-GB file and OOM the gc
@@ -845,7 +1055,9 @@ pub fn gc_stale_unlocks() {
                 // untagged file) is left to age out via the TTL check.
                 let scope_dead =
                     SessionScope::from_key(&token.scope_key).is_some_and(|scope| !scope.is_live());
-                if scope_dead || token.is_expired(now_unix()) {
+                // Only judged when the current boot is known.
+                let other_boot = boot.is_some_and(|cur| token.boot_id.as_deref() != Some(cur));
+                if scope_dead || other_boot || token.is_expired(now_unix()) {
                     let _ = std::fs::remove_file(&path);
                 }
             }
@@ -951,31 +1163,54 @@ pub enum GateOutcome {
 /// `false` (default for `login`/`list-roles`) means the y/N prompt fires on
 /// every invocation. `true` writes a session token after the first "yes" so
 /// subsequent calls under the same session ID skip the prompt.
+///
+/// Fails with `SessionUnlockUnavailable` whenever the gate applies but the
+/// current boot cannot be identified: no token is honoured or minted then.
 pub fn enforce(
     profile_name: &str,
     profile: &Profile,
     allow_inline_prompt: bool,
     persist_consent: bool,
 ) -> Result<GateOutcome> {
-    let is_locked = profile.lock_verifier.is_some();
+    enforce_in_boot(
+        profile_name,
+        profile,
+        allow_inline_prompt,
+        persist_consent,
+        current_boot_id(),
+    )
+}
+
+fn enforce_in_boot(
+    profile_name: &str,
+    profile: &Profile,
+    allow_inline_prompt: bool,
+    persist_consent: bool,
+    boot: Option<&str>,
+) -> Result<GateOutcome> {
     let markers = effective_markers(profile);
     let ai_marker = is_ai_context(&markers);
 
     // Fast path: nothing to enforce.
-    if !is_locked && ai_marker.is_none() {
+    if profile.lock_verifier.is_none() && ai_marker.is_none() {
         return Ok(GateOutcome::NotLocked);
     }
 
-    let token = read_valid_unlock(profile_name);
+    let boot = require_boot_id(boot)?;
+    let token = read_valid_unlock_in_boot(profile_name, Some(boot));
 
     // Locked profile must have a password-derived token. Ask-every-time is
     // not applied here: re-typing a password on every aws call would be
     // unworkable, so a successful inline password prompt always writes a
     // session token (subject to the configured TTL).
-    if is_locked {
-        let token_ok = token
-            .as_ref()
-            .is_some_and(|t| t.password_unlocked && (ai_marker.is_none() || t.allow_ai));
+    if let Some(phc) = profile.lock_verifier.as_deref() {
+        // The token must have been minted under the profile's current lock.
+        let current_fp = verifier_fingerprint(phc);
+        let token_ok = token.as_ref().is_some_and(|t| {
+            t.password_unlocked
+                && t.verifier_fp.as_deref() == Some(current_fp.as_str())
+                && (ai_marker.is_none() || t.allow_ai)
+        });
 
         if token_ok {
             return Ok(GateOutcome::AlreadyUnlocked);
@@ -997,14 +1232,9 @@ pub fn enforce(
         if allow_inline_prompt && tty_available() {
             let pw =
                 read_password_via_tty(&format!("Password for awzars profile '{}'", profile_name))?;
-
-            let phc = profile
-                .lock_verifier
-                .as_deref()
-                .expect("checked is_locked above");
             verify_password_or_fail(&pw, phc, profile_name)?;
             let ttl = resolve_ttl_secs(None, profile);
-            write_unlock(profile_name, ttl, false, true)?;
+            write_unlock_in_boot(profile_name, ttl, false, true, Some(phc), Some(boot))?;
             return Ok(GateOutcome::UnlockedNow { allow_ai: false });
         }
 
@@ -1019,7 +1249,11 @@ pub fn enforce(
     // invocation and the answer is NOT persisted. The caller can opt into
     // session-scoped remembering by passing `persist_consent = true`
     // (typically driven by the user's `--session-remember` flag).
-    let consent_ok = token.as_ref().is_some_and(|t| t.allow_ai);
+    // A consent token minted while the profile had a password lock does not
+    // carry over once that lock is removed.
+    let consent_ok = token
+        .as_ref()
+        .is_some_and(|t| t.allow_ai && t.verifier_fp.is_none());
     if consent_ok {
         return Ok(GateOutcome::AlreadyUnlocked);
     }
@@ -1054,7 +1288,7 @@ pub fn enforce(
         }
         if persist_consent {
             let ttl = resolve_ttl_secs(None, profile);
-            write_unlock(profile_name, ttl, true, false)?;
+            write_unlock_in_boot(profile_name, ttl, true, false, None, Some(boot))?;
             return Ok(GateOutcome::UnlockedNow { allow_ai: true });
         }
         return Ok(GateOutcome::ConsentedOnce);
@@ -1138,6 +1372,347 @@ mod tests {
             _tmp: tmp,
             _lock: lock,
         }
+    }
+
+    /// Stand-in PHC strings: tokens bind to a hash of the verifier string, so
+    /// the gate tests need no (slow) real Argon2 hash.
+    const TEST_VERIFIER: &str = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$first";
+    const TEST_VERIFIER_2: &str = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$second";
+
+    /// A password-locked profile with AI detection disabled, so the gate's
+    /// answer depends only on the token (cargo test may run under an agent).
+    fn locked_profile(verifier: &str) -> Profile {
+        Profile {
+            lock_verifier: Some(verifier.into()),
+            lock_ai_markers: Some(vec![]),
+            ..Default::default()
+        }
+    }
+
+    fn is_already_unlocked(outcome: Result<GateOutcome>) -> bool {
+        matches!(outcome, Ok(GateOutcome::AlreadyUnlocked))
+    }
+
+    #[test]
+    fn verifier_fingerprint_is_stable_and_distinct() {
+        let fp = verifier_fingerprint(TEST_VERIFIER);
+        assert_eq!(fp.len(), 32);
+        assert!(fp.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(fp, verifier_fingerprint(TEST_VERIFIER));
+        assert_ne!(fp, verifier_fingerprint(TEST_VERIFIER_2));
+    }
+
+    #[test]
+    fn token_honoured_only_under_the_verifier_it_was_minted_with() {
+        let _g = temp_xdg();
+        let prof = format!("test_vfp_{}", std::process::id());
+        write_unlock(&prof, 3600, false, true, Some(TEST_VERIFIER)).unwrap();
+
+        assert!(is_already_unlocked(enforce(
+            &prof,
+            &locked_profile(TEST_VERIFIER),
+            false,
+            false
+        )));
+        // Same profile name, different lock (password changed, or the profile
+        // was deleted and re-created): the old token no longer counts.
+        assert!(matches!(
+            enforce(&prof, &locked_profile(TEST_VERIFIER_2), false, false),
+            Err(AwzarsError::LockedProfile { .. })
+        ));
+        let _ = remove_unlock(&prof);
+    }
+
+    #[test]
+    fn legacy_format_token_is_not_honoured() {
+        let _g = temp_xdg();
+        let prof = format!("test_legacy_{}", std::process::id());
+        let scope = session_scope().unwrap();
+        let path = token_path(&scope, &prof).unwrap();
+        // The pre-binding token shape: no `v`, no verifier fingerprint.
+        let legacy = serde_json::json!({
+            "profile": prof,
+            "scope_key": scope.key(),
+            "created_at": now_unix(),
+            "ttl_secs": 3600,
+            "allow_ai": true,
+            "password_unlocked": true,
+            "start_time": scope.start_time(),
+        });
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            enforce(&prof, &locked_profile(TEST_VERIFIER), false, false),
+            Err(AwzarsError::LockedProfile { .. })
+        ));
+        assert!(!path.exists(), "a legacy token is removed when read");
+
+        // Same for AI consent on an unlocked profile.
+        let marker = format!("AWZARS_TEST_LEGACY_AI_{}", std::process::id());
+        std::env::set_var(&marker, "1");
+        let consent_profile = Profile {
+            lock_ai_markers: Some(vec![marker.clone()]),
+            ..Default::default()
+        };
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            enforce(&prof, &consent_profile, false, false),
+            Err(AwzarsError::AiContextBlocked { .. })
+        ));
+        assert!(!path.exists());
+        std::env::remove_var(&marker);
+    }
+
+    #[test]
+    fn ai_consent_token_requires_an_unlocked_binding() {
+        let _g = temp_xdg();
+        let prof = format!("test_consent_{}", std::process::id());
+        let marker = format!("AWZARS_TEST_CONSENT_AI_{}", std::process::id());
+        std::env::set_var(&marker, "1");
+        let unlocked = Profile {
+            lock_ai_markers: Some(vec![marker.clone()]),
+            ..Default::default()
+        };
+
+        // Consent granted on an unlocked profile keeps working.
+        write_unlock(&prof, 3600, true, false, None).unwrap();
+        assert!(is_already_unlocked(enforce(&prof, &unlocked, false, false)));
+
+        // A token minted while the profile had a lock stops counting for AI
+        // consent once the lock is removed.
+        write_unlock(&prof, 3600, true, true, Some(TEST_VERIFIER)).unwrap();
+        assert!(matches!(
+            enforce(&prof, &unlocked, false, false),
+            Err(AwzarsError::AiContextBlocked { .. })
+        ));
+        std::env::remove_var(&marker);
+        let _ = remove_unlock(&prof);
+    }
+
+    #[test]
+    fn lock_change_clears_tokens_in_every_scope() {
+        let _g = temp_xdg();
+        let prof = format!("test_sweep_{}", std::process::id());
+
+        // Unlock in session A.
+        std::env::set_var("AWZARS_SESSION_ID", "sweep_a");
+        write_unlock(&prof, 3600, false, true, Some(TEST_VERIFIER)).unwrap();
+        let path_a = token_path(&session_scope().unwrap(), &prof).unwrap();
+        assert!(path_a.exists());
+
+        // The lock changes from session B.
+        std::env::set_var("AWZARS_SESSION_ID", "sweep_b");
+        revoke_all_unlocks(&prof).unwrap();
+
+        // Session A's token is gone, and A is locked again.
+        std::env::set_var("AWZARS_SESSION_ID", "sweep_a");
+        assert!(!path_a.exists());
+        assert!(matches!(
+            enforce(&prof, &locked_profile(TEST_VERIFIER), false, false),
+            Err(AwzarsError::LockedProfile { .. })
+        ));
+        std::env::remove_var("AWZARS_SESSION_ID");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_change_sweep_matches_the_exact_profile_only() {
+        let _g = temp_xdg();
+        let dir = unlock_dir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("target.json");
+        std::fs::write(&target, b"{}").unwrap();
+
+        let swept = ["env-x-p.json", "env-x-p.fails", "sid-42-p.json"];
+        let kept = [
+            "env-x-a-p.json",  // profile `a-p`
+            "env-x-a-p.fails", // profile `a-p`
+            "env-x-pp.json",   // profile `pp`
+            "p.json",          // no scope key
+            "bogus-x-p.json",  // unknown scope tag
+            "env-x-p.txt",     // unknown extension
+            "notes",           // unrelated file
+        ];
+        for name in swept.iter().chain(kept.iter()) {
+            std::fs::write(dir.join(name), b"{}").unwrap();
+        }
+        std::os::unix::fs::symlink(&target, dir.join("env-y-p.json")).unwrap();
+
+        revoke_all_unlocks("p").unwrap();
+
+        for name in swept {
+            assert!(!dir.join(name).exists(), "{} should be removed", name);
+        }
+        for name in kept {
+            assert!(dir.join(name).exists(), "{} should be kept", name);
+        }
+        // The symlink itself and its target are both left alone.
+        assert!(std::fs::symlink_metadata(dir.join("env-y-p.json")).is_ok());
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn profile_recovered_from_stem() {
+        assert_eq!(profile_from_stem("env-x-p"), Some("p"));
+        assert_eq!(profile_from_stem("env-x-a-p"), Some("a-p"));
+        assert_eq!(profile_from_stem("sid-42-my-profile"), Some("my-profile"));
+        assert_eq!(profile_from_stem("sid-notanumber-p"), None);
+        assert_eq!(profile_from_stem("env-x-"), None);
+        assert_eq!(profile_from_stem("p"), None);
+    }
+
+    const BOOT_A: &str = "0a0a0a0a-0000-4000-8000-00000000000a";
+    const BOOT_B: &str = "0b0b0b0b-0000-4000-8000-00000000000b";
+
+    /// Write a hand-made token for `prof` in the current scope.
+    fn plant_token(prof: &str, boot_id: Option<&str>) -> PathBuf {
+        let scope = session_scope().unwrap();
+        let token = UnlockToken {
+            v: UNLOCK_TOKEN_VERSION,
+            profile: prof.to_string(),
+            scope_key: scope.key(),
+            created_at: now_unix(),
+            ttl_secs: 3600,
+            allow_ai: false,
+            password_unlocked: true,
+            start_time: scope.start_time(),
+            verifier_fp: Some(verifier_fingerprint(TEST_VERIFIER)),
+            boot_id: boot_id.map(String::from),
+        };
+        let path = token_path(&scope, prof).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&token).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn token_honoured_only_in_the_boot_it_was_minted_in() {
+        let _g = temp_xdg();
+        std::env::set_var("AWZARS_SESSION_ID", "boot_bind");
+        let prof = format!("test_boot_{}", std::process::id());
+        let locked = locked_profile(TEST_VERIFIER);
+
+        let written =
+            write_unlock_in_boot(&prof, 3600, false, true, Some(TEST_VERIFIER), Some(BOOT_A))
+                .unwrap();
+        assert_eq!(written.boot_id.as_deref(), Some(BOOT_A));
+        let path = token_path(&session_scope().unwrap(), &prof).unwrap();
+
+        // Same boot: honoured.
+        assert!(read_valid_unlock_in_boot(&prof, Some(BOOT_A)).is_some());
+        assert!(is_already_unlocked(enforce_in_boot(
+            &prof,
+            &locked,
+            false,
+            false,
+            Some(BOOT_A)
+        )));
+
+        // Another boot: refused and removed.
+        assert!(matches!(
+            enforce_in_boot(&prof, &locked, false, false, Some(BOOT_B)),
+            Err(AwzarsError::LockedProfile { .. })
+        ));
+        assert!(!path.exists());
+
+        // No boot id recorded: refused and removed.
+        let path = plant_token(&prof, None);
+        assert!(read_valid_unlock_in_boot(&prof, Some(BOOT_A)).is_none());
+        assert!(!path.exists());
+        std::env::remove_var("AWZARS_SESSION_ID");
+    }
+
+    #[test]
+    fn gc_removes_tokens_from_other_boots() {
+        let _g = temp_xdg();
+        std::env::set_var("AWZARS_SESSION_ID", "boot_gc");
+        let current = plant_token("p_current", Some(BOOT_A));
+        let other = plant_token("p_other", Some(BOOT_B));
+        let missing = plant_token("p_missing", None);
+        // Failed-attempt counters are not tied to a boot.
+        write_failure_counter(
+            "p_other",
+            &FailureCounter {
+                count: 1,
+                last_failure: now_unix(),
+            },
+        );
+        let fails = failure_path("p_other").unwrap();
+
+        gc_stale_unlocks_in_boot(Some(BOOT_A));
+
+        assert!(current.exists());
+        assert!(!other.exists());
+        assert!(!missing.exists());
+        assert!(fails.exists());
+
+        // Unknown current boot: GC does not judge boot ids at all.
+        let other = plant_token("p_other", Some(BOOT_B));
+        gc_stale_unlocks_in_boot(None);
+        assert!(other.exists());
+        std::env::remove_var("AWZARS_SESSION_ID");
+    }
+
+    #[test]
+    fn session_unlock_unavailable_without_a_boot_id() {
+        let _g = temp_xdg();
+        std::env::set_var("AWZARS_SESSION_ID", "boot_none");
+        let prof = format!("test_noboot_{}", std::process::id());
+
+        // No token is minted.
+        assert!(matches!(
+            write_unlock_in_boot(&prof, 3600, false, true, Some(TEST_VERIFIER), None),
+            Err(AwzarsError::SessionUnlockUnavailable)
+        ));
+        let path = token_path(&session_scope().unwrap(), &prof).unwrap();
+        assert!(!path.exists());
+
+        // An otherwise valid token is not honoured, for a locked profile or
+        // for AI consent.
+        plant_token(&prof, Some(BOOT_A));
+        assert!(read_valid_unlock_in_boot(&prof, None).is_none());
+        assert!(matches!(
+            enforce_in_boot(&prof, &locked_profile(TEST_VERIFIER), false, false, None),
+            Err(AwzarsError::SessionUnlockUnavailable)
+        ));
+        let marker = format!("AWZARS_TEST_NOBOOT_AI_{}", std::process::id());
+        std::env::set_var(&marker, "1");
+        let consent_profile = Profile {
+            lock_ai_markers: Some(vec![marker.clone()]),
+            ..Default::default()
+        };
+        assert!(matches!(
+            enforce_in_boot(&prof, &consent_profile, false, false, None),
+            Err(AwzarsError::SessionUnlockUnavailable)
+        ));
+        std::env::remove_var(&marker);
+        std::env::remove_var("AWZARS_SESSION_ID");
+    }
+
+    #[test]
+    fn boot_id_shape() {
+        assert!(is_well_formed_boot_id(BOOT_A));
+        assert!(is_well_formed_boot_id(
+            "0A0FE65E-F8F3-48A2-AC7B-25AD71D6EEF0"
+        ));
+        assert!(!is_well_formed_boot_id(""));
+        assert!(!is_well_formed_boot_id(&BOOT_A[1..]));
+        assert!(!is_well_formed_boot_id(&format!("{}0", BOOT_A)));
+        assert!(!is_well_formed_boot_id(
+            "0a0a0a0a-0000-4000-8000-00000000000g"
+        ));
+        assert!(!is_well_formed_boot_id(
+            "0a0a0a0a-0000-4000-8000-00000000000/"
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn current_boot_id_is_available_and_stable() {
+        let id = current_boot_id().expect("this host exposes a boot id");
+        assert!(is_well_formed_boot_id(id), "unexpected boot id {:?}", id);
+        assert_eq!(current_boot_id(), Some(id));
+        assert_eq!(read_boot_id().as_deref(), Some(id));
     }
 
     #[test]
@@ -1249,7 +1824,7 @@ mod tests {
         let prof = format!("test_st_{}", std::process::id());
         let _ = remove_unlock(&prof);
 
-        let token = write_unlock(&prof, 3600, false, true).unwrap();
+        let token = write_unlock(&prof, 3600, false, true, Some(TEST_VERIFIER)).unwrap();
         // On Linux we must capture a start_time; elsewhere it's best-effort.
         if cfg!(target_os = "linux") {
             assert!(
@@ -1276,6 +1851,7 @@ mod tests {
         // current session leader's, then verify read_valid_unlock rejects it.
         let scope = session_scope().unwrap();
         let bogus = UnlockToken {
+            v: UNLOCK_TOKEN_VERSION,
             profile: prof.clone(),
             scope_key: scope.key(),
             created_at: now_unix(),
@@ -1283,6 +1859,8 @@ mod tests {
             allow_ai: false,
             password_unlocked: true,
             start_time: Some(u64::MAX),
+            verifier_fp: Some(verifier_fingerprint(TEST_VERIFIER)),
+            boot_id: current_boot_id().map(String::from),
         };
         let path = token_path(&scope, &prof).unwrap();
         std::fs::write(&path, serde_json::to_vec(&bogus).unwrap()).unwrap();
@@ -1299,7 +1877,7 @@ mod tests {
         let _ = remove_unlock(&prof);
 
         assert!(read_valid_unlock(&prof).is_none());
-        let written = write_unlock(&prof, 3600, true, true).unwrap();
+        let written = write_unlock(&prof, 3600, true, true, Some(TEST_VERIFIER)).unwrap();
         let read = read_valid_unlock(&prof).expect("token should exist");
         assert_eq!(read.profile, written.profile);
         assert_eq!(read.scope_key, written.scope_key);
@@ -1321,6 +1899,7 @@ mod tests {
         // is now the "never expires" sentinel, not "instantly expired".
         let scope = session_scope().unwrap();
         let stale = UnlockToken {
+            v: UNLOCK_TOKEN_VERSION,
             profile: prof.clone(),
             scope_key: scope.key(),
             created_at: now_unix().saturating_sub(3600),
@@ -1328,6 +1907,8 @@ mod tests {
             allow_ai: false,
             password_unlocked: true,
             start_time: scope.start_time(),
+            verifier_fp: Some(verifier_fingerprint(TEST_VERIFIER)),
+            boot_id: current_boot_id().map(String::from),
         };
         let path = token_path(&scope, &prof).unwrap();
         std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
@@ -1344,7 +1925,7 @@ mod tests {
         let _ = remove_unlock(&prof);
 
         // ttl_secs = 0 is the --no-expire sentinel: token must remain valid.
-        write_unlock(&prof, 0, true, false).unwrap();
+        write_unlock(&prof, 0, true, false, None).unwrap();
         let read = read_valid_unlock(&prof).expect("no-expire token must be valid");
         assert_eq!(read.ttl_secs, 0);
         assert!(!read.is_expired(now_unix()));
@@ -1512,7 +2093,7 @@ mod tests {
         let prof = format!("test_env_rt_{}", std::process::id());
         let _ = remove_unlock(&prof);
 
-        let written = write_unlock(&prof, 3600, true, false).unwrap();
+        let written = write_unlock(&prof, 3600, true, false, None).unwrap();
         assert_eq!(written.scope_key, "env-roundtrip_box");
         assert!(written.start_time.is_none(), "env scope binds no PID");
 

@@ -115,6 +115,9 @@ tempfile = "3.9"
 
 # Per-profile password lock: Argon2id for verifier hashing.
 argon2 = "0.5"
+# Session unlock tokens: fingerprint of the lock verifier they were minted
+# under. Same major as the copy already pulled in by aws-sigv4.
+sha2 = "0.11"
 
 # Per-profile password lock: getsid() / kill(sid, 0) for session-scoped unlock tokens.
 # `term` adds termios bindings used to disable ECHO when reading a password

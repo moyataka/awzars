@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Docs: per-platform configuration paths (#19).
 - Credentials from short sessions (under 30 minutes) are reused from the cache instead of re-running the browser login on every call (#22).
 - Keychain read errors are reported instead of being treated as a missing entry, so existing keys are kept.
+- Session unlock tokens are tied to the profile's current password lock and to the current boot, and are cleared in every session when the lock changes or the profile is deleted. Run `awzars unlock` once after upgrading.
 
 ## [1.0.3] - 2026-06-17
 

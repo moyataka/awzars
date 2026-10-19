@@ -20,8 +20,9 @@
 //! `UnlockToken::is_expired` treats as "never". The token still dies with
 //! the terminal session — `$XDG_RUNTIME_DIR` is tmpfs (auto-reaped on
 //! logout) and `gc_stale_unlocks` drops tokens whose SID is no longer
-//! alive. There is no time fallback, so a forgotten unlock on a
-//! long-lived session has no safety net beyond logging out.
+//! alive — and with a reboot, since tokens are bound to the boot. There is
+//! no time fallback, so a forgotten unlock on a long-lived session has no
+//! safety net beyond logging out or rebooting.
 
 use crate::auth::lock;
 use crate::cli::args::{LOCK_TTL_HARD_CAP_HOURS, LOCK_TTL_SOFT_CAP_HOURS};
@@ -88,6 +89,7 @@ pub fn run(
     };
 
     if let Some(phc) = profile.lock_verifier.as_deref() {
+        lock::ensure_session_unlock_available()?;
         let pw: lock::PasswordInput = Zeroizing::new(
             dialoguer::Password::new()
                 .with_prompt(format!("Password for awzars profile '{}'", profile_name))
@@ -95,7 +97,7 @@ pub fn run(
                 .map_err(|e| AwzarsError::Dialog(e.to_string()))?,
         );
         lock::verify_password_or_fail(&pw, phc, profile_name)?;
-        let token = lock::write_unlock(profile_name, ttl_secs, allow_ai, true)?;
+        let token = lock::write_unlock(profile_name, ttl_secs, allow_ai, true, Some(phc))?;
         print_unlocked(profile_name, &token, quiet);
         return Ok(());
     }
@@ -117,6 +119,7 @@ pub fn run(
     // under Claude Code's Bash tool — the explicit `--allow-ai` flag *is*
     // the consent, and the AI tool's own command-approval layer has already
     // prompted the user. Skip the prompt rather than hanging.
+    lock::ensure_session_unlock_available()?;
     if stdin_is_tty {
         let answer = dialoguer::Confirm::new()
             .with_prompt(format!(
@@ -135,7 +138,7 @@ pub fn run(
         }
     }
 
-    let token = lock::write_unlock(profile_name, ttl_secs, true, false)?;
+    let token = lock::write_unlock(profile_name, ttl_secs, true, false, None)?;
     print_unlocked(profile_name, &token, quiet);
     Ok(())
 }
