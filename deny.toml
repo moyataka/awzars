@@ -27,7 +27,9 @@ version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained (not a vulnerability); only reached via ratatui's proc-macros at build time. Revisit when ratatui drops it." },
+]
 
 [licenses]
 version = 2
@@ -44,6 +46,9 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",
     "OpenSSL",
+    # Data licence of the Mozilla CA bundle shipped in webpki-roots (via the
+    # rustls-based HTTPS client); permissive, no copyleft.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 # ring's license is a compound of BSD/ISC/MIT/OpenSSL; accept it explicitly.

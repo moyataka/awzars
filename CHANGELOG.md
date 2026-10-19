@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - A missing role now reports the closest available roles and how to fix the profile, instead of `Principal not found` (#33).
+- Dependencies refreshed and an unused browser-download feature removed.
 
 ## [1.0.4] - 2026-10-20
 
