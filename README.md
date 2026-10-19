@@ -407,7 +407,7 @@ For wrappers and shell scripts:
 | `0` | Success, or user quit (e.g. `q` in the role selector / TUI) |
 | `1` | Generic IO / serialization failure |
 | `2` | Config error (missing profile, malformed `config.toml`) |
-| `3` | Azure / SAML auth failure |
+| `3` | Azure / SAML auth failure, or the requested role is not in the SAML assertion |
 | `4` | Browser or network failure |
 | `5` | AWS STS / keyring / cache failure, or the refresh-lock wait timed out |
 | `6` | TUI / dialog failure |

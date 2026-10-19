@@ -141,6 +141,7 @@ fn error_to_exit_code(e: &AwzarsError) -> u8 {
         AwzarsError::Network(_) => 4,
         AwzarsError::ProfileNotFound(_) => 2,
         AwzarsError::NoRolesAvailable => 3,
+        AwzarsError::RoleNotInAssertion { .. } => 3,
         AwzarsError::CredentialExpired => 5,
         AwzarsError::Tui(_) => 6,
         AwzarsError::UserQuit => 0,
