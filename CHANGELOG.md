@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Roles are listed in a stable order, by account and then by name (#18).
 
 ### Fixed
+- Unlock on macOS now resolves the terminal's session like Linux does, so commands run in their own `setsid` session (e.g. by agent harnesses) match the terminal's unlock (#25).
 - `~/.aws/config` handling: commented section headers, preservation of non-profile sections, comments and unexposed keys, and rejection of name collisions (#1, #2, #3, #15, #16).
 - Login: identity overrides no longer reuse cached credentials (#5); SAML role/provider pairs are accepted in either order (#6); the profile's `session_duration` is honoured (#9).
 - Browser: SAML is captured before console submission (#8); remembered sessions are reused and renewed on local logins (#13).
@@ -19,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - TUI: saving an AWS profile applies only that change to the current ~/.aws/config, keeping profiles and settings edited elsewhere while the TUI is open (#24).
 - CLI: `-q/--quiet` is honoured (#17); inline AI consent requires an interactive stderr (#14).
 - Docs: per-platform configuration paths (#19).
+- Keychain read errors are reported instead of being treated as a missing entry, so existing keys are kept.
 
 ## [1.0.3] - 2026-06-17
 
