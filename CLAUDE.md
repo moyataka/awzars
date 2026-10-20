@@ -20,7 +20,7 @@ cargo zigbuild --test '*' --target x86_64-unknown-linux-musl
 target/x86_64-unknown-linux-musl/release/awzars
 ```
 
-Supported platforms: macOS on Apple Silicon (arm64) and Linux (glibc or static musl). Windows is not supported yet: `auth/lock.rs` uses `nix` (termios, `getsid`, `kill`) without a platform guard and `nix` is Unix-only, so the crate does not build for Windows; CI does not build it. Rust 1.89 or newer is required (`refresh_lock.rs` uses `std::fs::File::try_lock`).
+Supported platforms: macOS on Apple Silicon (arm64; Intel macOS is not supported) and Linux (glibc or static musl). Windows is not supported yet: `auth/lock.rs` uses `nix` (termios, `getsid`, `kill`) without a platform guard and `nix` is Unix-only, so the crate does not build for Windows; CI does not build it. Rust 1.89 or newer is required (`refresh_lock.rs` uses `std::fs::File::try_lock`).
 
 ## Releasing
 

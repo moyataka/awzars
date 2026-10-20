@@ -120,7 +120,8 @@ package dependencies on the static-build path. The default release target
 is a static musl-linked Linux binary; native builds on macOS and glibc Linux
 work too and are convenient for development.
 
-**Supported platforms:** macOS on Apple Silicon (arm64) and Linux (glibc, or
+**Supported platforms:** macOS on Apple Silicon (arm64; Intel macOS is not
+supported) and Linux (glibc, or
 the static musl build). Windows is not supported yet: the session-lock code
 uses Unix-only APIs (`nix` termios and `getsid`), so the crate does not build
 for Windows, and CI does not build it.
