@@ -9,7 +9,7 @@
 
 ## Summary
 
-No current critical, high, medium, or low exploitable issues were identified in the reviewed tree. No hard-coded secrets, command injection paths, cleartext persisted AWS credentials, SQL injection paths, or `unsafe` Rust were found.
+No current critical, high, medium, or low exploitable issues were identified in the reviewed tree. No hard-coded secrets, command injection paths, cleartext persisted AWS credentials, or SQL injection paths were found. The only `unsafe` Rust is the small, `SAFETY`-commented macOS FFI in `src/auth/lock.rs` (`proc_pidinfo`, `sysctlbyname`).
 
 Current residual risks are accepted by the project threat model and documented below.
 
@@ -24,23 +24,23 @@ Current residual risks are accepted by the project threat model and documented b
 
 ### M-2 — Failure-counter backoff is same-UID resettable
 
-`src/auth/lock.rs:88-160`
+`src/auth/lock.rs:94-180`
 
 Failed unlock attempts are tracked in `<unlock_dir>/<scope_key>-<profile>.fails` (where `<scope_key>` is `sid-<n>` or `env-<key>`). A same-UID actor can delete that file and reset the escalating backoff.
 
 Accepted because the backoff is anti-fat-finger pacing, not the real brute-force defense. Password resistance comes from Argon2id parameters, and an adversarial same-UID AI/process could also bypass marker detection by changing its environment.
 
-### L-2 — Session start-time binding is Linux-only
+### L-2 — Session start-time binding is Linux-first
 
 `src/auth/lock.rs` (`process_start_time`, `read_valid_unlock`)
 
-Linux `sid-` scoped unlock tokens bind to `/proc/<sid>/stat` start time to reject stale tokens after SID reuse. Non-Linux hosts — and `env-` scoped tokens (`AWZARS_SESSION_ID`, which have no session-leader PID) — fall back to scope-key + TTL only.
+Linux `sid-` scoped unlock tokens bind to `/proc/<sid>/stat` start time to reject stale tokens after SID reuse. On macOS the start time is read with `proc_pidinfo`, which usually cannot read a root-owned `login` session leader, so the binding is best-effort there. `claude-` and `env-` scoped tokens have no session-leader PID and carry no start time. Every token is still bound to its scope key, the current boot id and the profile's current lock verifier, and to its TTL.
 
-Accepted because SID reuse attacks are outside the AI-consent threat model. If this changes, implement macOS `proc_pidinfo` support.
+Accepted because SID reuse attacks are outside the AI-consent threat model.
 
 ### L-8 — Config loading follows `config.toml` symlinks
 
-`src/config/profile.rs:83-125`, `src/config/mod.rs:56-90`
+`src/config/profile.rs:93-156`, `src/config/mod.rs:44-106`
 
 `Config::load()` opens `config.toml` with path-following `File::open`. The default config directory is tightened to `0o700`, so this is not a cross-UID issue, but a same-UID actor or user-controlled `--config-dir` can point awzars at another readable TOML file.
 
@@ -54,7 +54,7 @@ The unlock/consent token is no longer keyed on `getsid(0)` (one session per cont
 
 1. `AWZARS_SESSION_ID` — explicit operator override (`env-<key>`), validated `[A-Za-z0-9_]{1,64}`.
 2. `CLAUDE_CODE_SESSION_ID` — the Claude conversation id (`claude-<hex>`), exported into every command Claude spawns. This is the stable per-agent anchor that survives the per-command setsid/PTY isolation; it is what makes `awzars unlock --allow-ai` run from the Claude prompt visible to the agent's later `credential-process` / `login` calls.
-3. The controlling-terminal session via a bounded `/proc` ancestry walk (`sid-<n>`), for plain interactive (non-agent) use — distinct per terminal / zellij pane — falling back to `getsid(0)` when no ancestor owns a tty.
+3. The controlling-terminal session via a bounded ancestry walk (`/proc` on Linux, `proc_pidinfo` on macOS) (`sid-<n>`), for plain interactive (non-agent) use — distinct per terminal / zellij pane — falling back to `getsid(0)` when no ancestor owns a tty.
 
 Filenames are type-tagged (`sid-` / `claude-` / `env-`) so the key spaces cannot collide.
 
@@ -65,15 +65,16 @@ Security implication of the Claude-conversation scope (accepted):
 
 Residual risks, accepted:
 
-- **Ancestry trust** (the `sid-` walk). The walk reads ancestor `/proc/<pid>/stat` (ppid / session / tty_nr). A same-UID actor could craft a process tree to steer which session is selected, but a same-UID actor can already read the unlock token and the OS keyring directly, so this grants no new capability. The walk is bounded (32 hops) and falls back to `getsid(0)` when no ancestor owns a tty.
-- **`AWZARS_SESSION_ID` / `CLAUDE_CODE_SESSION_ID` keys.** Both become a filename component. `AWZARS_SESSION_ID` is validated `[A-Za-z0-9_]{1,64}` (no separators, no `.`/`..` traversal, `-`-free so `<scope_key>-<profile>` splits unambiguously; a malformed value is ignored with a warning); `CLAUDE_CODE_SESSION_ID` is sanitized to its alphanumerics before use. Neither `claude-` nor `env-` tokens carry a session-leader PID, so they lose the start-time PID-reuse binding (L-2) and `kill(0)` liveness — they rely on the TTL and the tmpfs logout reap.
+- **Ancestry trust** (the `sid-` walk). The walk reads ancestor `/proc/<pid>/stat` (ppid / session / tty_nr) on Linux, or `proc_pidinfo` (ppid / controlling tty) plus `getsid` on macOS. A same-UID actor could craft a process tree to steer which session is selected, but a same-UID actor can already read the unlock token and the OS keyring directly, so this grants no new capability. The walk is bounded (32 hops) and falls back to `getsid(0)` when no ancestor owns a tty.
+- **`AWZARS_SESSION_ID` / `CLAUDE_CODE_SESSION_ID` keys.** Both become a filename component. `AWZARS_SESSION_ID` is validated `[A-Za-z0-9_]{1,64}` (no separators, no `.`/`..` traversal, `-`-free so `<scope_key>-<profile>` splits unambiguously; a malformed value is ignored with a warning); `CLAUDE_CODE_SESSION_ID` is sanitized to its alphanumerics before use. Neither `claude-` nor `env-` tokens carry a session-leader PID, so they lose the start-time PID-reuse binding (L-2) and `kill(0)` liveness — they rely on the TTL, the boot binding and the tmpfs logout reap.
 
 ## Positive Controls
 
 - AWS STS credentials are stored in the OS keyring and in process memory only.
 - Browser cookies are stored as `cookies.enc` using ChaCha20-Poly1305 and keyring-backed versioned keys.
 - SAML assertions are size-capped, namespace-scoped, issuer/audience/time/recipient checked, and wrapped in `Zeroizing<String>`.
-- Remote Chrome requires `wss://` by default; `ws://` requires an explicit insecure flag.
+- Remote Chrome requires `wss://` by default; `ws://` requires an explicit insecure flag. (The WebSocket client is currently built without TLS support, so `wss://` cannot connect yet and remote Chrome needs `ws://` with that flag.)
+- Session unlock tokens (format v2) are bound to the profile's current lock verifier and to the current boot; older tokens are refused. Setting, changing or removing the password, or deleting the profile, removes the profile's tokens in every session scope.
 - File writes use atomic temp-file replacement with `O_EXCL | O_NOFOLLOW`; AWS config writes reject symlinked targets.
 - CLI parsers validate profile names, tenant UUIDs, role ARNs, session duration, and app ID URI shape.
 - Panic handling wipes cached cookie keys and restores terminal state even with `panic = "abort"`.
@@ -83,8 +84,8 @@ Residual risks, accepted:
 
 ## Caveats
 
-- CI remains the authoritative source for live `cargo audit` and `cargo deny` advisory tracking.
-- macOS Keychain and Windows Credential Manager behavior were not smoke-tested locally.
+- CI (`.github/workflows/ci.yml`) runs `cargo deny check`, including RustSec advisories, on every push and pull request and weekly; it is the authoritative source for advisory tracking. `cargo audit` is not run in CI.
+- macOS Keychain behavior was not smoke-tested locally. Windows is not a supported platform.
 - Chromium and browser runtime exploitation are delegated to upstream Chromium.
 
 *End of audit.*

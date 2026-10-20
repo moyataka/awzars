@@ -18,10 +18,9 @@ cargo zigbuild --test '*' --target x86_64-unknown-linux-musl
 
 # Binary location
 target/x86_64-unknown-linux-musl/release/awzars
-
-# Alternative: cross (see Cross.toml)
-cross build --release --target x86_64-unknown-linux-musl
 ```
+
+Supported platforms: macOS on Apple Silicon (arm64) and Linux (glibc or static musl). Windows is not supported yet: `auth/lock.rs` uses `nix` (termios, `getsid`, `kill`) without a platform guard and `nix` is Unix-only, so the crate does not build for Windows; CI does not build it. Rust 1.89 or newer is required (`refresh_lock.rs` uses `std::fs::File::try_lock`).
 
 ## Releasing
 
@@ -54,8 +53,8 @@ awzars login --force-refresh
 # Persist browser session (skip re-auth on future logins)
 awzars login --remember-me
 
-# Use with remote Chrome (for headless/CI)
-CHROME_REMOTE_URL="ws://host:9222/devtools/browser/xxx" awzars login
+# Use with remote Chrome (for headless/CI); only ws:// works today, see Remote Chrome Setup
+CHROME_REMOTE_URL="ws://localhost:9222/devtools/browser/xxx" awzars login --allow-insecure-remote-chrome
 
 # Clear cached credentials (prompts for confirmation; pass --yes to skip)
 awzars clear-cache
@@ -91,7 +90,7 @@ src/
 ├── cli/
 │   ├── args.rs                  # clap definitions, validators (parse_*), LoginArgs/ConfigureArgs
 │   └── commands/
-│       ├── login.rs             # Pipeline: launch_browser → authenticate → shutdown browser → select_role → STS → persist
+│       ├── login.rs             # Pipeline: launch_browser → authenticate → shutdown browser → select_role → STS → persist; role resolution (resolve_role / choose_role / suggest_roles, missing-role fallback and save prompt)
 │       ├── configure.rs         # Interactive profile creation (validators on every prompt)
 │       ├── list_roles.rs        # Browser-driven role listing (browser shut down after SAML extraction)
 │       ├── credential_process.rs # AWS credential_process integration (auto-reauth via cookies)
@@ -104,15 +103,19 @@ src/
 ├── browser/
 │   ├── chromium.rs              # chromiumoxide automation, cookie store, remote-Chrome connect
 │   ├── cookie_crypto.rs         # ChaCha20-Poly1305 cookie encryption with versioned key rotation
+│   ├── saml_capture.rs          # Captures the SAMLResponse from the browser's POST to an AWS sign-in host before it is submitted
 │   └── selectors/               # Azure login page CSS selectors + versioning
 ├── auth/
 │   ├── azure/
 │   │   ├── saml.rs              # SAML assertion parsing, validation, role extraction
 │   │   └── protocol.rs          # Pure SAML-build/extract/AWS-redirect helpers (no chromium dep)
-│   ├── aws/sts.rs               # STS AssumeRoleWithSAML
+│   ├── aws/
+│   │   ├── arn.rs               # IAM ARN parsing (role / SAML provider; aws, aws-cn, aws-us-gov partitions)
+│   │   └── sts.rs               # STS AssumeRoleWithSAML
 │   ├── credentials/
-│   │   └── pipeline.rs          # try_load_credentials: cache → keyring fallback (single source of truth)
-│   └── lock.rs                  # Per-profile password lock + AI consent gate (Argon2id, getsid-scoped tokens)
+│   │   ├── pipeline.rs          # try_load_credentials: cache → keyring fallback (single source of truth)
+│   │   └── refresh_lock.rs      # Per-profile cross-process refresh lock (<config-dir>/refresh-<profile>.lock, 60 s wait bound)
+│   └── lock.rs                  # Per-profile password lock + AI consent gate (Argon2id; session-scoped tokens bound to lock verifier + boot)
 ├── storage/
 │   ├── cache.rs                 # In-memory credential cache (per-profile)
 │   └── keyring.rs               # OS keychain integration (single JSON entry per profile)
@@ -125,8 +128,10 @@ src/
 ├── tui/
 │   ├── app.rs                   # ratatui role selector (mouse + search/filter)
 │   ├── aws_config.rs            # AWS config INI parser + atomic writer, configurable path, role_session_name
+│   ├── aws_config/document.rs   # Line-preserving edits: applies one profile's changes to the current ~/.aws/config
 │   ├── form.rs                  # ProfileForm + AwsProfileForm with autocomplete, visible-field indices
 │   ├── form_ops.rs              # Pure FieldOp + key_to_field_op + move_index helpers
+│   ├── regions.rs               # AWS region list for autocomplete
 │   ├── tui_error.rs             # TuiResultExt: .tui()? wraps any Display error → AwzarsError::Tui
 │   └── manager/
 │       ├── mod.rs               # ConfigManager type, event loop, key/mouse routing
@@ -157,19 +162,32 @@ awzars unlock             # Unlock a locked profile (or grant AI consent on an u
 awzars lock               # Drop this session's unlock token for a profile
 ```
 
-Global options: `--profile` (default: "default"), `-v`/`-vv`/`-vvv`, `--quiet`, `--config-dir` (env: `AWZARS_CONFIG_DIR`). Env-only: `AWZARS_SESSION_ID` (`[A-Za-z0-9_]{1,64}`) overrides the unlock token's session scope, for detached/headless/CI contexts where no controlling terminal sits in the process ancestry.
+Global options: `-p`/`--profile` (default: "default"; commands take no positional profile, e.g. `awzars --profile work unlock`), `-v`/`-vv`/`-vvv`, `-q`/`--quiet`, `--config-dir` (env: `AWZARS_CONFIG_DIR`).
 
-Login options: `--role-arn`, `--azure-tenant`, `--azure-app`, `--session-duration`, `--headless`, `--no-sandbox`, `--force-refresh`, `--output` (text/json/table), `--credential-process`, `--show-secrets`, `--remember-me`, `--allow-insecure-remote-chrome`, `--session-remember` (persist AI consent for the session; default re-prompts every call)
+Environment variables:
+- `AWZARS_AZURE_TENANT_ID` / `AWZARS_AZURE_APP_ID_URI`: defaults for `--azure-tenant` / `--azure-app` on `login` and `configure` (flags win; the generic `AZURE_TENANT_ID` / `AZURE_APP_ID_URI` are ignored).
+- `AWZARS_REFRESH_LOCK_TIMEOUT_SECS`: how long a `login` / `credential-process` waits for another refresh of the same profile (positive whole seconds; default 60; anything else falls back to 60). On timeout the call fails with exit code 5.
+- `AWZARS_SESSION_ID` (`[A-Za-z0-9_]{1,64}`): overrides the unlock token's session scope, for detached/headless/CI contexts where no controlling terminal sits in the process ancestry. `CLAUDE_CODE_SESSION_ID` is used as the scope when it is set and `AWZARS_SESSION_ID` is not (see Profile Locking).
+- `CHROME_REMOTE_URL`: use a remote Chrome (see Remote Chrome Setup). `CHROME`: path to the local Chrome binary (a macOS `.app` bundle is resolved to its binary).
+- `RUST_LOG`: log filter when `--quiet` is not set.
+
+Login options: `--role-arn`, `--azure-tenant`, `--azure-app`, `--session-duration`, `--headless`, `--no-sandbox`, `--force-refresh`, `-o`/`--output` (text/json/table), `--credential-process`, `--show-secrets`, `--remember-me`, `--allow-insecure-remote-chrome`, `--session-remember` (persist AI consent for the session; default re-prompts every call)
+
+Login role resolution (`login.rs` `resolve_role` / `choose_role`): if the profile's configured `role_arn` is missing from the SAML assertion and a person can answer (stdin and stdout are terminals, no `--credential-process`), login warns and opens the role picker (a single remaining role is confirmed with y/N, default No), then asks whether to save the chosen role (default No). Declining stores neither the role nor the credentials. An explicit `--role-arn` is never replaced. Otherwise the error `RoleNotInAssertion` (exit 3) lists up to 5 closest roles (case-only match, then same account, then edit distance) and the two ways to fix the profile. `list-roles` (table/text output) prints a note on stderr when the configured role is missing.
+
+Credential-process options: `--refresh` (ignore stored credentials), `--headless`, `--no-sandbox`, `--allow-insecure-remote-chrome` (each overrides the profile setting).
+
+Credential freshness: stored credentials are reused until `min(15 min, session_duration / 2)` before expiry (`credential_process/protocol.rs` `refresh_buffer`), judged by the profile's `session_duration`. Cache hits never take the refresh lock; misses take `<config-dir>/refresh-<profile>.lock`, re-check, then sign in. Interactive login prompts (remember-me, role picker, save-role) run outside the lock.
 
 Configure options: `--azure-tenant`, `--azure-app`, `--role-arn`, `--session-duration`, `--non-interactive`
 
-Clear-cache options: `--yes` (skip confirmation prompt).
+Clear-cache options: `--yes` (skip confirmation prompt). Clears the in-process cache and the profile's keyring entries, including `cookie_key` (`KeyringStorage::delete_credentials`), so the saved `cookies.enc` can no longer be decrypted.
 
 Delete-profile options: `--yes` (skip confirmation prompt). Cleans up the awzars config entry, keyring credentials (incl. cookie key), in-memory cache, and the per-profile chromium dir. **Does not** modify `~/.aws/config` — AWS profiles still pointing at the deleted awzars profile are listed as a warning so they can be edited by hand.
 
 Set-password options: `--remove` (clear the lock; still requires the old password). TTY-only; refuses if stdin is not a terminal so passwords can never be piped in. Argon2id PHC string lives in `<config-dir>/config.toml` under the profile entry. No minimum password length is enforced — typing speed is prioritized, with the dialoguer confirmation step (entered twice) as the only safety net against typos.
 
-Unlock options: `--allow-ai` (permit AI agents in this session — `CLAUDECODE` / `AI_AGENT` env markers — to use the credentials), `--ttl-hours <N>` (override the default 8h; soft-capped at 24h, raise to the 720h / 30-day hard cap with `--allow-long-ttl`), `--allow-long-ttl` (opt-in for `--ttl-hours > 24`), `--no-expire` (skip time expiry — token lives as long as the session does, dies on logout; conflicts with `--ttl-hours` / `--allow-long-ttl`). Password-locked profiles require a TTY and prompt for the password. Unlocked profiles only need `--allow-ai` — TTY not required, so it can be invoked through Claude Code's Bash tool. See `SECURITY_AUDIT.md` for the tradeoff.
+Unlock options: `--allow-ai` (permit AI agents in this session — `CLAUDECODE` / `AI_AGENT` env markers — to use the credentials), `--ttl-hours <N>` (override the default 8h; soft-capped at 24h, raise to the 720h / 30-day hard cap with `--allow-long-ttl`), `--allow-long-ttl` (opt-in for `--ttl-hours > 24`), `--no-expire` (skip time expiry; the token still ends at reboot, a `sid-` token ends with its terminal session, and tokens under `$XDG_RUNTIME_DIR` go at logout; conflicts with `--ttl-hours` / `--allow-long-ttl`). Fails with `SessionUnlockUnavailable` (exit 11) before prompting when the boot cannot be identified. Password-locked profiles require a TTY and prompt for the password. Unlocked profiles only need `--allow-ai` — TTY not required, so it can be invoked through Claude Code's Bash tool. See `SECURITY_AUDIT.md` for the tradeoff.
 
 Lock options: none. Idempotent: removes the current session's unlock token if any.
 
@@ -182,7 +200,9 @@ Opt-in per-profile gate that fences credential-producing operations (`login`, `c
 1. **Password lock**: enabled by `awzars set-password <profile>`. Stores an Argon2id PHC string in the profile entry. Every credential operation in a fresh terminal session prompts for the password (or refuses, if non-interactive — see below).
 2. **AI consent**: applies whenever the environment contains a known AI marker (`CLAUDECODE` or `AI_AGENT` by default, configurable via the profile's `lock_ai_markers`). Even *unlocked* profiles refuse credential operations under AI until the user consents. The y/N prompt is gated on `stdin().is_terminal()`: fires per call during interactive `login` / `list-roles` (pass `--session-remember` to persist), skipped under piped stdin (AWS CLI's `credential_process`, Claude Code's Bash tool) — those refuse with `AiContextBlocked` pointing at `awzars unlock --allow-ai`. Password prompts for locked profiles are separate (read from `/dev/tty`). Locked + AI refuses without any prompt; see `SECURITY_AUDIT.md` for rationale.
 
-**Session boundary** is resolved by priority: (1) `AWZARS_SESSION_ID` (`[A-Za-z0-9_]{1,64}`, explicit override → `env-<key>`); (2) `CLAUDE_CODE_SESSION_ID` (the Claude conversation id → `claude-<hex>`) — exported into every command Claude spawns, so an `awzars unlock` run from the Claude prompt and the agent's later AWS calls share one scope even though each command runs in its own `setsid`/PTY session (this is what fixes "unlock doesn't work under claude agents"); (3) the controlling-terminal session via a `/proc` ancestry walk (`sid-<n>`, distinct per terminal / zellij pane), falling back to `getsid(0)`. Token is a JSON file at `$XDG_RUNTIME_DIR/awzars/sessions/<scope_key>-<profile>.json` (mode 0o600), auto-reaped on logout (tmpfs); falls back to `~/.cache/awzars/sessions/` when XDG_RUNTIME_DIR is unset. The Claude-conversation scope means the agent itself shares the unlock, so an unlocked profile is no barrier to an agent allowed to run `awzars unlock --allow-ai` — **password-lock the profile for a hard gate** (a password unlock needs a real TTY the agent can't supply). See the L-9 entry in `SECURITY_AUDIT.md`.
+**Session boundary** is resolved by priority: (1) `AWZARS_SESSION_ID` (`[A-Za-z0-9_]{1,64}`, explicit override → `env-<key>`); (2) `CLAUDE_CODE_SESSION_ID` (the Claude conversation id → `claude-<hex>`) — exported into every command Claude spawns, so an `awzars unlock` run from the Claude prompt and the agent's later AWS calls share one scope even though each command runs in its own `setsid`/PTY session (this is what fixes "unlock doesn't work under claude agents"); (3) the controlling-terminal session via a bounded (32-hop) ancestry walk to the nearest tty-owning ancestor (`sid-<n>`, distinct per terminal / zellij pane) — `/proc/<pid>/stat` on Linux, `proc_pidinfo(PROC_PIDTBSDINFO)` + `getsid(pid)` on macOS — falling back to `getsid(0)`. Token is a JSON file `<scope_key>-<profile>.json` (mode 0o600) in `$XDG_RUNTIME_DIR/awzars/sessions/` (auto-reaped on logout where that is a tmpfs); when `XDG_RUNTIME_DIR` is unset, in `ProjectDirs` `cache_dir()` + `awzars/sessions/`: `~/Library/Caches/com.awzars.awzars/awzars/sessions/` on macOS, `${XDG_CACHE_HOME:-~/.cache}/awzars/awzars/sessions/` on Linux.
+
+**Token binding** (`UnlockToken`, format `v: 2`): a token is honoured only if (a) its scope key and profile match; (b) its `boot_id` equals the current boot (`/proc/sys/kernel/random/boot_id` on Linux, `sysctl kern.bootsessionuuid` on macOS; with no well-formed boot id no token is minted or honoured and gated commands fail with `SessionUnlockUnavailable`, exit 11); (c) for `sid-` tokens, the recorded session-leader start time matches (Linux `/proc/<sid>/stat`; macOS `proc_pidinfo`, best-effort because a root-owned `login` leader is usually unreadable); (d) it is unexpired; and (e) in `enforce`, its `verifier_fp` (domain-separated SHA-256 of the profile's `lock_verifier`, truncated to 128 bits) matches the profile's current verifier — a consent token for an unlocked profile must carry none. Tokens with `v < 2` are refused and removed. `set-password` (set, change, `--remove`) and profile deletion (`delete-profile`, TUI delete) call `revoke_all_unlocks`, which removes the profile's `.json` tokens and `.fails` counters in every scope. The Claude-conversation scope means the agent itself shares the unlock, so an unlocked profile is no barrier to an agent allowed to run `awzars unlock --allow-ai` — **password-lock the profile for a hard gate** (a password unlock needs a real TTY the agent can't supply). See the L-9 entry in `SECURITY_AUDIT.md`.
 
 **TTL**: default 8 h. Override per-profile (`Profile.lock_ttl_hours`) or per-unlock (`--ttl-hours`, soft-capped at 24 h; pass `--allow-long-ttl` to extend up to the 720 h / 30-day hard ceiling). The profile-stored override is *not* gated — it is treated as a deliberate one-time edit; the per-call CLI ratchet is the one that needs an opt-in.
 
@@ -202,9 +222,10 @@ Schema additions on `Profile` (all `Option<_>`, omitted when unset): `lock_verif
 - **aws-config / aws-sdk-sts** (`default-https-client` → `rustls-aws-lc`,
   rustls 0.23): STS AssumeRoleWithSAML. The legacy `rustls` feature flag
   (which pulled rustls 0.21 via `legacy-rustls-ring`) is deliberately not
-  used; see the L-6 entry in `SECURITY_AUDIT.md`.
+  used (see the comment in `Cargo.toml`).
 - **keyring** (3.x with `apple-native` / `windows-native` /
-  `sync-secret-service` / `crypto-rust`): OS keychain storage. The published
+  `sync-secret-service` / `crypto-rust` / `vendored`): OS keychain storage
+  (`windows-native` is enabled but Windows is not a supported target). The published
   `keyring 4.0` is a CLI binary, not the library; the library line stays
   on 3.x until `keyring-core 1.0` settles.
 - **ratatui** + **crossterm**: Terminal UI for role selection
@@ -214,7 +235,9 @@ Schema additions on `Profile` (all `Option<_>`, omitted when unset): `lock_verif
 - **dialoguer**: Interactive prompts (configure, remember-me prompt)
 - **tempfile**: Ephemeral browser data directories (auto-cleaned on drop)
 - **argon2**: Argon2id password hashing for the per-profile lock verifier
-- **nix**: `getsid()` / `kill(sid, 0)` for session-scoped unlock tokens (the `sid-` scope; its session id is resolved by walking `/proc` up to the controlling-terminal ancestor — see Profile Locking / L-9)
+- **sha2**: SHA-256 fingerprint of the lock verifier stored in session unlock tokens
+- **nix** (`process`, `signal`, `term`): `getsid()` / `kill(sid, 0)` for session-scoped unlock tokens and termios to disable echo for `/dev/tty` password prompts (the `sid-` scope's session id is resolved by walking up to the controlling-terminal ancestor via `/proc` on Linux or `proc_pidinfo` on macOS — see Profile Locking / L-9). Unix-only, not platform-guarded: this is why Windows does not build
+- **libc** (macOS-only dependency): `proc_pidinfo` for the ancestry walk and `sysctlbyname("kern.bootsessionuuid")` for the boot id
 
 ## Security
 
@@ -232,8 +255,9 @@ Schema additions on `Profile` (all `Option<_>`, omitted when unset): `lock_verif
 - Panic hook (installed in `main.rs`) restores terminal state (raw mode, alternate screen, mouse capture, cursor) and wipes the in-process cookie key cache before the default handler runs — important because `panic = "abort"` (release profile) skips Drop impls
 - TLS 1.2+ via rustls (no native-tls/OpenSSL)
 - SAML assertions never written to disk
-- SAML extraction gated on verified AWS URL (`signin.aws.amazon.com`); non-AWS pages never harvested
-- Remote Chrome: `wss://` enforced by default; `ws://` only with `--allow-insecure-remote-chrome` + warning; session IDs redacted from logs; userinfo in URLs rejected
+- SAML extraction gated on an HTTPS POST to `/saml` on port 443 of an AWS sign-in host (`signin.aws.amazon.com`, `signin.amazonaws.cn`, `signin.amazonaws-us-gov.com`, `browser/saml_capture.rs`); non-AWS pages never harvested
+- Remote Chrome: `wss://` required by default; `ws://` only with `--allow-insecure-remote-chrome` + warning; session IDs redacted from logs; userinfo in URLs rejected. Current limitation: the WebSocket stack (chromiumoxide → async-tungstenite) is built without a TLS feature, so `wss://` URLs pass validation but cannot connect
+- Keychain reads (`storage::keyring::read_secret`) treat only `NoEntry` as missing; any other error (locked keychain, denied access) is returned, so an unreadable item is never regenerated or overwritten
 - XML-escaped `app_id_uri` in AuthnRequest to prevent injection
 - Ephemeral `--user-data-dir` with `tempfile::TempDir` auto-cleanup (non-remember-me sessions)
 - SAML client-side validation: issuer (URL-normalized), audience, Recipient, time window (30s skew), inverted-time-window rejection. **No XML-DSIG verification client-side** — integrity is delegated to TLS-to-Azure plus AWS STS re-verification in `AssumeRoleWithSAML`.
@@ -243,7 +267,7 @@ Schema additions on `Profile` (all `Option<_>`, omitted when unset): `lock_verif
 
 ## Configuration
 
-Stored in `<config-dir>/config.toml`. `<config-dir>` is `$XDG_CONFIG_HOME/awzars` (or `~/.config/awzars`) on Linux, `~/Library/Application Support/com.awzars.awzars` on macOS, and `%APPDATA%\awzars\awzars\config` on Windows. An absolute `--config-dir` overrides `AWZARS_CONFIG_DIR`, which overrides these defaults. Top-level field `aws_config_path` (optional string) overrides the default `~/.aws/config` path used by the TUI and deletion orphan scan. Chromium persistent sessions (from `--remember-me`) are stored in `<config-dir>/chromium/<profile>/`.
+Stored in `<config-dir>/config.toml`. `<config-dir>` is `$XDG_CONFIG_HOME/awzars` (or `~/.config/awzars`) on Linux and `~/Library/Application Support/com.awzars.awzars` on macOS (on Windows, which is not supported yet, `ProjectDirs` would give `%APPDATA%\awzars\awzars\config`). An absolute `--config-dir` overrides `AWZARS_CONFIG_DIR`, which overrides these defaults. Top-level field `aws_config_path` (optional string) overrides the default `~/.aws/config` path used by the TUI and deletion orphan scan. Chromium persistent sessions (from `--remember-me`) are stored in `<config-dir>/chromium/<profile>/`.
 
 **AWS region for STS**: the per-profile `region` field is the region used for the `AssumeRoleWithSAML` call. Resolution precedence (`auth::aws::sts::build_region_provider`): profile `region` → AWS default chain (`AWS_REGION` / `AWS_DEFAULT_REGION`, `~/.aws/config`, IMDS) → `us-east-1` fallback. So a region set only in `<config-dir>/config.toml` is honored (it was previously parsed/stored but ignored by STS), and the call never fails purely for lack of a configured region. The profile `region` takes precedence over the `AWS_REGION` env var because it is an explicit awzars-profile setting; blank/whitespace values are treated as unset.
 
@@ -252,7 +276,7 @@ Stored in `<config-dir>/config.toml`. `<config-dir>` is `$XDG_CONFIG_HOME/awzars
 When authenticating via remote Chrome (`CHROME_REMOTE_URL`) with `--remember-me`, session cookies are extracted and saved locally to `<config-dir>/chromium/<profile>/cookies.enc` (mode 0o600, ChaCha20-Poly1305 encrypted). This enables subsequent `credential-process` calls to silently re-authenticate using **local** headless Chrome — no remote Chrome needed after the initial login.
 
 Flow:
-1. `CHROME_REMOTE_URL=ws://... awzars login --remember-me` → authenticate via remote Chrome, cookies saved locally
+1. `CHROME_REMOTE_URL=ws://... awzars login --remember-me --allow-insecure-remote-chrome` → authenticate via remote Chrome, cookies saved locally
 2. `awzars credential-process` → launches local headless Chrome, injects saved cookies, silent re-auth
 
 The cookie store is also used when a persistent Chrome user-data-dir would cause SingletonLock conflicts (another Chrome using the same profile). In this case, cookies are injected into a fresh temp directory instead.
@@ -291,10 +315,12 @@ When used with `--remember-me`, session cookies are automatically extracted and 
 
 Security:
 - `wss://` is required by default (TLS-encrypted WebSocket)
-- `ws://` (unencrypted) is rejected unless `--allow-insecure-remote-chrome` is passed
-- `--allow-insecure-remote-chrome` prints a prominent warning about unencrypted credential exposure
+- `ws://` (unencrypted) is rejected unless `--allow-insecure-remote-chrome` is passed (`credential-process` also honours the profile's `allow_insecure_remote_chrome`; `login` reads only the flag)
+- `--allow-insecure-remote-chrome` prints a prominent warning about unencrypted credential exposure, plus a separate warning when the host is not loopback
 - WebSocket session IDs are redacted from log output
 - URLs with embedded userinfo (`user:pass@host`) are rejected
+
+Current limitation: `chromiumoxide` connects through `async-tungstenite` without any TLS feature enabled (see `Cargo.lock`), so a `wss://` URL passes `validate_ws_url` but the connection fails. Remote Chrome therefore works only over `ws://` with `--allow-insecure-remote-chrome`; keep it on loopback (SSH tunnel). `list-roles` always passes `allow_insecure = false` (`list_roles.rs`), so it cannot use a remote Chrome today.
 
 ### Option 1: Chrome on macOS, awzars on Linux
 
@@ -310,22 +336,22 @@ On macOS, start Chrome with remote debugging:
 SSH port forward from Linux to Mac:
 
 ```bash
-# On Linux, forward local 9222 to Mac's 9222
-ssh -R 9222:localhost:9222 user@mac-host -N
+# On Linux: make Linux's localhost:9222 reach the Mac's port 9222
+ssh -L 9222:localhost:9222 user@mac-host -N
 ```
 
 Or reverse (if Mac connects to Linux):
 
 ```bash
-# On Mac, forward local 9222 to Linux's 9222
-ssh -L 9222:localhost:9222 user@linux-host -N
+# On Mac: expose the Mac's port 9222 as localhost:9222 on Linux
+ssh -R 9222:localhost:9222 user@linux-host -N
 ```
 
 Then on Linux:
 
 ```bash
 export CHROME_REMOTE_URL="ws://localhost:9222/devtools/browser/xxx"
-awzars login
+awzars login --allow-insecure-remote-chrome
 ```
 
 ### Option 2: Chrome on remote Linux
@@ -337,9 +363,9 @@ chromium --remote-debugging-port=9222 --headless --no-sandbox
 # Get WebSocket URL
 curl http://remote:9222/json/version
 
-# Use with awzars
+# Use with awzars (ws:// is unencrypted: prefer an SSH tunnel to localhost)
 export CHROME_REMOTE_URL="ws://remote:9222/devtools/browser/xxx"
-awzars login
+awzars login --allow-insecure-remote-chrome
 ```
 
 ## TUI Config Manager
@@ -378,7 +404,7 @@ awzars login
 1. Build SAML AuthnRequest (DEFLATE + base64 encoded, XML-escaped app_id_uri)
 2. Navigate to Azure AD login URL (tenant_id validated as UUID)
 3. User authenticates (MFA supported)
-4. Extract SAMLResponse from verified AWS redirect page only
+4. Capture the SAMLResponse from the browser's HTTPS POST to an AWS sign-in host's `/saml` endpoint (`browser/saml_capture.rs`), before the AWS console receives it
 5. **Shut down the browser** (graceful CDP close before any further processing — avoids spurious chromiumoxide WARN messages and prevents the AWS role-selection page from appearing live alongside the terminal TUI selector)
 6. Parse roles from assertion, validate issuer/audience/recipient/time-window
 7. Call STS AssumeRoleWithSAML (region resolved as profile `region` → AWS default chain → `us-east-1` fallback)
