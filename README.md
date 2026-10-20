@@ -238,6 +238,48 @@ sudo install -m 0755 awzars /usr/local/bin/awzars
 
 The Linux musl binary runs unmodified on Alpine, distroless, and any glibc host.
 
+### How releases are built
+
+Releases are built by GitHub Actions, not on a maintainer's machine. Pushing
+a `vX.Y.Z` tag on `main` runs
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which:
+
+1. checks that the tag matches the version in `Cargo.toml` and runs the tests;
+2. builds the macOS (Apple Silicon) binary natively and the static Linux
+   binary with `cargo zigbuild`;
+3. packages each as `awzars-vX.Y.Z-<target>.tar.gz` (just the `awzars`
+   binary), writes `SHA256SUMS` and records a
+   [build provenance attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations)
+   for each archive;
+4. creates a **draft** release with the notes from `CHANGELOG.md`. A
+   maintainer reviews it and publishes it.
+
+The macOS binary is not signed or notarized.
+
+### Verify a download
+
+Download the archive and `SHA256SUMS` from the release page, then check the
+checksum and, with the [GitHub CLI](https://cli.github.com/), the provenance:
+
+```bash
+TAG=vX.Y.Z
+ASSET=awzars-$TAG-x86_64-unknown-linux-musl.tar.gz   # or awzars-$TAG-aarch64-apple-darwin.tar.gz
+curl -fsSLO "https://github.com/moyataka/awzars/releases/download/$TAG/$ASSET"
+curl -fsSLO "https://github.com/moyataka/awzars/releases/download/$TAG/SHA256SUMS"
+shasum -a 256 -c SHA256SUMS --ignore-missing
+gh attestation verify "$ASSET" --repo moyataka/awzars \
+  --signer-workflow moyataka/awzars/.github/workflows/release.yml \
+  --source-ref "refs/tags/$TAG"
+```
+
+With these flags, `gh attestation verify` checks that this exact archive was
+attested by the `release.yml` workflow of `moyataka/awzars`, in a run started
+by the `$TAG` tag. It shows where and from which tag the archive was built,
+not that the code is correct.
+
+Releases up to v1.0.4 were built by hand and have no attestation (only v1.0.4
+ships a `SHA256SUMS`).
+
 ### From source
 
 After building (see **Build from source** above):

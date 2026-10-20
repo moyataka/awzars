@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 - Login: when the profile's role is missing from the SAML assertion, warn and offer the role picker, then optionally save the choice (#33).
 - Continuous integration: formatting on Linux, lints and tests on Linux and macOS, a static Linux build, and dependency checks (cargo-deny) (#36).
+- Tag-driven release workflow: pushing a `v*` tag builds macOS and static Linux binaries with checksums and build provenance, as a draft release.
 
 ### Changed
 - A missing role now reports the closest available roles and how to fix the profile, instead of `Principal not found` (#33).
