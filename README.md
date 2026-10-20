@@ -137,7 +137,7 @@ cd awzars
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup toolchain install stable      # 1.89 or newer (std File::try_lock)
+rustup toolchain install stable      # 1.91.1 or newer (required by the AWS SDK crates in Cargo.lock)
 ```
 
 ### 3a. Static musl build (recommended for distribution)

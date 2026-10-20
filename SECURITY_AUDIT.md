@@ -50,7 +50,7 @@ Accepted because local config is already trusted: a same-UID actor who can contr
 
 `src/auth/lock.rs` (`session_scope`, `terminal_session_id`, `ProcStat`)
 
-The unlock/consent token is no longer keyed on `getsid(0)` (one session per controlling terminal). Under an AI agent, `getsid(0)` returns a *fresh throwaway id per command* — Claude Code's Bash tool spawns each command in its own `setsid` session (and, in some configurations, its own PTY), so an unlock written by one command was invisible to the next and the lock could never be cleared from the agent. The scope is now resolved by priority:
+The unlock/consent token is not keyed on the raw `getsid(0)` of the calling process. Under an AI agent, `getsid(0)` returns a *fresh throwaway id per command* — Claude Code's Bash tool spawns each command in its own `setsid` session (and, in some configurations, its own PTY) — so a token keyed on it would not be visible to the agent's next command. The scope is resolved by priority:
 
 1. `AWZARS_SESSION_ID` — explicit operator override (`env-<key>`), validated `[A-Za-z0-9_]{1,64}`.
 2. `CLAUDE_CODE_SESSION_ID` — the Claude conversation id (`claude-<hex>`), exported into every command Claude spawns. This is the stable per-agent anchor that survives the per-command setsid/PTY isolation; it is what makes `awzars unlock --allow-ai` run from the Claude prompt visible to the agent's later `credential-process` / `login` calls.
@@ -61,7 +61,7 @@ Filenames are type-tagged (`sid-` / `claude-` / `env-`) so the key spaces cannot
 Security implication of the Claude-conversation scope (accepted):
 
 - The scope is "this Claude conversation", not "this human". Every command in the conversation — including the agent's own tool calls — shares it. So once anyone runs `awzars unlock --allow-ai` for the profile in that conversation, the agent can use the credentials for the rest of it. This is the intended grant ("the human unlocks, the agent works"), but it also means the AI could issue that unlock itself: for an *unlocked* (no-password) profile the only thing between an autonomous agent and the credentials is the AI tool's own command-approval layer (which surfaces the `awzars unlock --allow-ai` invocation for the human to approve or deny). This is the same "honest limit" already documented for AI-marker detection — `awzars` makes the casual path safe and the grant explicit; it does not defeat a tool permitted to run arbitrary commands. **For a hard gate, password-lock the profile** (`awzars set-password`): a password unlock requires a real TTY (`/dev/tty`), which the agent's piped stdio cannot supply, so the agent cannot self-unlock a password-locked profile.
-- Before this change the per-command throwaway sid *incidentally* stopped a self-issued unlock from persisting across the agent's commands; that side effect is gone. The protection now rests explicitly on the approval layer and (for the strong case) the password lock — not on a scoping accident.
+- Because the scope spans the whole conversation, an unlock the agent issues itself also persists across its later commands. The protection rests explicitly on the AI tool's approval layer and (for the strong case) the password lock, not on how commands are isolated into sessions.
 
 Residual risks, accepted:
 
@@ -84,7 +84,7 @@ Residual risks, accepted:
 
 ## Caveats
 
-- CI (`.github/workflows/ci.yml`) runs `cargo deny check`, including RustSec advisories, on every push and pull request and weekly; it is the authoritative source for advisory tracking. `cargo audit` is not run in CI.
+- CI (`.github/workflows/ci.yml`) runs `cargo deny check`, including RustSec advisories, on pushes to `dev` and `main`, on pull requests, and weekly; it is the authoritative source for advisory tracking. `cargo audit` is not run in CI.
 - macOS Keychain behavior was not smoke-tested locally. Windows is not a supported platform.
 - Chromium and browser runtime exploitation are delegated to upstream Chromium.
 

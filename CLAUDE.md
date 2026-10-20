@@ -20,7 +20,7 @@ cargo zigbuild --test '*' --target x86_64-unknown-linux-musl
 target/x86_64-unknown-linux-musl/release/awzars
 ```
 
-Supported platforms: macOS on Apple Silicon (arm64; Intel macOS is not supported) and Linux (glibc or static musl). Windows is not supported yet: `auth/lock.rs` uses `nix` (termios, `getsid`, `kill`) without a platform guard and `nix` is Unix-only, so the crate does not build for Windows; CI does not build it. Rust 1.89 or newer is required (`refresh_lock.rs` uses `std::fs::File::try_lock`).
+Supported platforms: macOS on Apple Silicon (arm64; Intel macOS is not supported) and Linux (glibc or static musl). Windows is not supported yet: `auth/lock.rs` uses `nix` (termios, `getsid`, `kill`) without a platform guard and `nix` is Unix-only, so the crate does not build for Windows; CI does not build it. Rust 1.91.1 or newer is required with the committed Cargo.lock (the AWS SDK crates declare it); `refresh_lock.rs` alone needs 1.89 for `std::fs::File::try_lock`.
 
 ## Releasing
 
@@ -197,7 +197,7 @@ Opt-in per-profile gate that fences credential-producing operations (`login`, `c
 
 **Two protection levels** (independent — either, both, or neither apply per profile):
 
-1. **Password lock**: enabled by `awzars set-password <profile>`. Stores an Argon2id PHC string in the profile entry. Every credential operation in a fresh terminal session prompts for the password (or refuses, if non-interactive — see below).
+1. **Password lock**: enabled by `awzars --profile <profile> set-password`. Stores an Argon2id PHC string in the profile entry. Every credential operation in a fresh terminal session prompts for the password (or refuses, if non-interactive — see below).
 2. **AI consent**: applies whenever the environment contains a known AI marker (`CLAUDECODE` or `AI_AGENT` by default, configurable via the profile's `lock_ai_markers`). Even *unlocked* profiles refuse credential operations under AI until the user consents. The y/N prompt is gated on `stdin().is_terminal()`: fires per call during interactive `login` / `list-roles` (pass `--session-remember` to persist), skipped under piped stdin (AWS CLI's `credential_process`, Claude Code's Bash tool) — those refuse with `AiContextBlocked` pointing at `awzars unlock --allow-ai`. Password prompts for locked profiles are separate (read from `/dev/tty`). Locked + AI refuses without any prompt; see `SECURITY_AUDIT.md` for rationale.
 
 **Session boundary** is resolved by priority: (1) `AWZARS_SESSION_ID` (`[A-Za-z0-9_]{1,64}`, explicit override → `env-<key>`); (2) `CLAUDE_CODE_SESSION_ID` (the Claude conversation id → `claude-<hex>`) — exported into every command Claude spawns, so an `awzars unlock` run from the Claude prompt and the agent's later AWS calls share one scope even though each command runs in its own `setsid`/PTY session (this is what fixes "unlock doesn't work under claude agents"); (3) the controlling-terminal session via a bounded (32-hop) ancestry walk to the nearest tty-owning ancestor (`sid-<n>`, distinct per terminal / zellij pane) — `/proc/<pid>/stat` on Linux, `proc_pidinfo(PROC_PIDTBSDINFO)` + `getsid(pid)` on macOS — falling back to `getsid(0)`. Token is a JSON file `<scope_key>-<profile>.json` (mode 0o600) in `$XDG_RUNTIME_DIR/awzars/sessions/` (auto-reaped on logout where that is a tmpfs); when `XDG_RUNTIME_DIR` is unset, in `ProjectDirs` `cache_dir()` + `awzars/sessions/`: `~/Library/Caches/com.awzars.awzars/awzars/sessions/` on macOS, `${XDG_CACHE_HOME:-~/.cache}/awzars/awzars/sessions/` on Linux.
