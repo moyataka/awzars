@@ -267,12 +267,18 @@ ASSET=awzars-$TAG-x86_64-unknown-linux-musl.tar.gz   # or awzars-$TAG-aarch64-ap
 curl -fsSLO "https://github.com/moyataka/awzars/releases/download/$TAG/$ASSET"
 curl -fsSLO "https://github.com/moyataka/awzars/releases/download/$TAG/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS --ignore-missing
-gh attestation verify "$ASSET" --repo moyataka/awzars
+gh attestation verify "$ASSET" --repo moyataka/awzars \
+  --signer-workflow moyataka/awzars/.github/workflows/release.yml \
+  --source-ref "refs/tags/$TAG"
 ```
 
-`gh attestation verify` confirms the archive was built by this repository's
-release workflow from the tagged commit. Releases up to v1.0.4 were built by
-hand and have checksums but no attestation.
+With these flags, `gh attestation verify` checks that this exact archive was
+attested by the `release.yml` workflow of `moyataka/awzars`, in a run started
+by the `$TAG` tag. It shows where and from which tag the archive was built,
+not that the code is correct.
+
+Releases up to v1.0.4 were built by hand and have no attestation (only v1.0.4
+ships a `SHA256SUMS`).
 
 ### From source
 

@@ -47,7 +47,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           if ! printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::Tag '$TAG' is not of the form vX.Y.Z"
+            echo "::error::Tag '$TAG' is not of the form vX.Y.Z or vX.Y.Z-<pre-release>"
             exit 1
           fi
           VERSION="${TAG#v}"
@@ -160,8 +160,18 @@ jobs:
           BIN="target/$TARGET/release/awzars"
           file "$BIN"
           case "$TARGET" in
-            *-linux-musl) file "$BIN" | grep -Eq 'static-pie linked|statically linked' ;;
-            aarch64-apple-darwin) file "$BIN" | grep -q 'Mach-O 64-bit executable arm64' ;;
+            *-linux-musl)
+              if ! file "$BIN" | grep -Eq 'static-pie linked|statically linked'; then
+                echo "::error::$BIN is not statically linked; the musl release must have no dynamic dependencies"
+                exit 1
+              fi
+              ;;
+            aarch64-apple-darwin)
+              if ! file "$BIN" | grep -q 'Mach-O 64-bit executable arm64'; then
+                echo "::error::$BIN is not an arm64 Mach-O executable; check the macOS runner architecture"
+                exit 1
+              fi
+              ;;
           esac
           OUT=$("$BIN" --version)
           echo "$OUT"
@@ -207,12 +217,14 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write # create the draft release and upload its assets
+    # GH_TOKEN is set only on the steps that call `gh`.
     env:
-      GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ needs.verify.outputs.tag }}
     steps:
       - name: Refuse to overwrite an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # The release list includes drafts for a token with push access, so
           # a draft left by an earlier run is caught too.
@@ -255,13 +267,20 @@ jobs:
             echo "Each archive has a GitHub build provenance attestation. Verify it with the GitHub CLI:"
             echo
             echo '```bash'
-            echo "gh attestation verify awzars-$TAG-<target>.tar.gz --repo $GH_REPO"
+            echo "gh attestation verify awzars-$TAG-<target>.tar.gz --repo $GH_REPO \\"
+            echo "  --signer-workflow $GH_REPO/.github/workflows/release.yml \\"
+            echo "  --source-ref refs/tags/$TAG"
             echo '```'
           } > notes/notes.md
           cat notes/notes.md
       - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$TAG" --draft --verify-tag --title "$TAG" \
+          # A tag with a pre-release suffix (vX.Y.Z-rc.1) becomes a pre-release.
+          PRERELEASE=()
+          case "$TAG" in *-*) PRERELEASE=(--prerelease) ;; esac
+          gh release create "$TAG" --draft "${PRERELEASE[@]}" --verify-tag --title "$TAG" \
             --notes-file notes/notes.md \
             "dist/awzars-$TAG-aarch64-apple-darwin.tar.gz" \
             "dist/awzars-$TAG-x86_64-unknown-linux-musl.tar.gz" \
