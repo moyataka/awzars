@@ -706,7 +706,9 @@ fn aws_config_file_applies_between_the_override_and_the_default() {
         let env_file = directory.path().join("from-env");
         std::fs::write(&env_file, "[profile env]\nregion = us-east-1\n").unwrap();
         for (case, value) in [("set", env_file.as_os_str()), ("empty", "".as_ref())] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            // Re-runs this test binary itself, not an external program.
+            let test_binary = std::env::current_exe().unwrap(); // nosemgrep: rust.lang.security.current-exe.current-exe
+            let output = std::process::Command::new(test_binary)
                 .args([
                     "--exact",
                     "tui::aws_config::regression_tests::aws_config_file_applies_between_the_override_and_the_default",
