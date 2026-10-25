@@ -541,6 +541,44 @@ fn back_to_back_saves_keep_every_backup() {
 }
 
 #[test]
+fn a_backup_name_clash_gets_the_next_numeric_suffix() {
+    let (directory, path) = config_file(BASE);
+    let now = chrono::DateTime::parse_from_rfc3339("2026-10-25T10:15:30.123Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let stem = "config.bak.20261025T101530.123Z";
+    std::fs::write(directory.path().join(stem), "taken").unwrap();
+
+    for expected in ["-1", "-2"] {
+        super::backup_aws_config(&path, BASE, now).unwrap();
+        let backup = directory.path().join(format!("{stem}{expected}"));
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), BASE, "{expected}");
+    }
+    assert_eq!(
+        backups(&path),
+        [stem.to_string(), format!("{stem}-1"), format!("{stem}-2")]
+    );
+    let order = |suffix: &str| super::backup_order("config", &format!("{stem}{suffix}"));
+    assert!(order("") < order("-1") && order("-1") < order("-2"));
+}
+
+#[test]
+fn a_signed_clash_suffix_is_not_a_backup_and_survives_pruning() {
+    let (directory, path) = config_file(BASE);
+    let signed = "config.bak.20000101T000000.000Z-+5";
+    std::fs::write(directory.path().join(signed), "keep").unwrap();
+    for n in 0..12 {
+        let name = format!("config.bak.200001{:02}T000000.000Z", n + 1);
+        std::fs::write(directory.path().join(name), "old").unwrap();
+    }
+
+    edit_region(&path, "eu-central-1");
+
+    assert!(directory.path().join(signed).exists());
+    assert_eq!(backups(&path).len(), 11);
+}
+
+#[test]
 fn backup_names_match_strictly_and_clashes_sort_after_their_timestamp() {
     let order = |file_name: &str| super::backup_order("config", file_name);
     let base = "config.bak.20261025T101530.123Z";
@@ -549,6 +587,8 @@ fn backup_names_match_strictly_and_clashes_sort_after_their_timestamp() {
     for other in [
         "config.bak.20261025T101530.123Z-",
         "config.bak.20261025T101530.123Z-x",
+        "config.bak.20261025T101530.123Z-+5",
+        "config.bak.20261025T101530.123Z--1",
         "config.bak.20261025T101530.123",
         "config.bak.20261025-101530.123Z",
         "config.bak-20261025-tag",

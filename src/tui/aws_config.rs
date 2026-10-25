@@ -244,7 +244,7 @@ pub fn save_aws_config(
     };
     let (output, overridden) = document::Document::parse(&contents).apply(op)?;
     if exists && output != contents {
-        backup_aws_config(&path, &contents)?;
+        backup_aws_config(&path, &contents, chrono::Utc::now())?;
     }
     crate::util::atomic_write(&path, output.as_bytes(), 0o600)?;
     Ok(overridden)
@@ -254,9 +254,13 @@ pub fn save_aws_config(
 const BACKUP_COUNT: usize = 10;
 
 /// Copy `contents` (the file as read before this save) to a new
-/// `<path>.bak.<timestamp>`, then delete all but the newest
-/// [`BACKUP_COUNT`] backups of `path`.
-fn backup_aws_config(path: &Path, contents: &str) -> std::io::Result<()> {
+/// `<path>.bak.<timestamp>` named after `now`, then delete all but the
+/// newest [`BACKUP_COUNT`] backups of `path`.
+fn backup_aws_config(
+    path: &Path,
+    contents: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::io::Result<()> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -266,11 +270,7 @@ fn backup_aws_config(path: &Path, contents: &str) -> std::io::Result<()> {
                 format!("{} has no usable file name", path.display()),
             )
         })?;
-    let stem = format!(
-        "{}.bak.{}",
-        name,
-        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
-    );
+    let stem = format!("{}.bak.{}", name, now.format("%Y%m%dT%H%M%S%.3fZ"));
     let mut backup = path.with_file_name(&stem);
     let mut clash = 0;
     while std::fs::symlink_metadata(&backup).is_ok() {
