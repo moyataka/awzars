@@ -211,6 +211,8 @@ cargo test --all-targets
 cargo deny check          # advisories, licences, bans (openssl, native-tls), sources
 ```
 
+Before opening an issue or pull request, read [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Install
 
 ### Pre-built binary
