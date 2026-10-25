@@ -272,9 +272,12 @@ mod tests {
             assert_eq!(stored.is_valid(3600), expected_fresh, "{seconds_remaining}");
             let profile = format!("freshness_{}", uuid::Uuid::new_v4());
             let cache = crate::storage::cache::CacheHandle::new(&profile).unwrap();
-            cache.store(&output).unwrap();
+            cache.store(&output, "identity").unwrap();
             assert_eq!(
-                cache.get_valid_credentials(3600).unwrap().is_some(),
+                cache
+                    .get_valid_credentials(3600, "identity")
+                    .unwrap()
+                    .is_some(),
                 expected_fresh
             );
             cache.clear().unwrap();
@@ -375,16 +378,21 @@ mod tests {
                 );
                 let profile = format!("short_session_{}", uuid::Uuid::new_v4());
                 let cache = crate::storage::cache::CacheHandle::new(&profile).unwrap();
-                cache.store(&output).unwrap();
+                cache.store(&output, "identity").unwrap();
                 assert_eq!(
-                    cache.get_valid_credentials(lifetime).unwrap().is_some(),
+                    cache
+                        .get_valid_credentials(lifetime, "identity")
+                        .unwrap()
+                        .is_some(),
                     expected_fresh,
                     "{label}"
                 );
                 assert_eq!(
-                    crate::auth::credentials::try_load_credentials(&profile, duration, false)
-                        .unwrap()
-                        .is_some(),
+                    crate::auth::credentials::try_load_credentials(
+                        &profile, "identity", duration, false
+                    )
+                    .unwrap()
+                    .is_some(),
                     expected_fresh,
                     "{label}"
                 );

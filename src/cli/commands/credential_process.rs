@@ -44,9 +44,17 @@ pub async fn execute(args: &Args) -> Result<()> {
     // waiting behind another process's browser sign-in (#23).
     let profile_name = args.profile.as_str();
     let session_duration = profile.azure.session_duration;
-    if let Some(creds) =
-        crate::auth::credentials::try_load_credentials(profile_name, session_duration, refresh)?
-    {
+    let identity = crate::auth::credentials::credential_identity(
+        &profile.azure.tenant_id,
+        &profile.azure.app_id_uri,
+        profile.role_arn.as_deref(),
+    );
+    if let Some(creds) = crate::auth::credentials::try_load_credentials(
+        profile_name,
+        &identity,
+        session_duration,
+        refresh,
+    )? {
         write_credentials_json(&creds)?;
         return Ok(());
     }
@@ -57,7 +65,14 @@ pub async fn execute(args: &Args) -> Result<()> {
     let quiet = args.quiet;
     let (credentials, _refresh_guard) = crate::auth::credentials::refresh_under_lock(
         profile_name,
-        || crate::auth::credentials::try_load_credentials(profile_name, session_duration, refresh),
+        || {
+            crate::auth::credentials::try_load_credentials(
+                profile_name,
+                &identity,
+                session_duration,
+                refresh,
+            )
+        },
         move || async move {
             refresh_credentials(
                 profile_name,
@@ -149,7 +164,12 @@ async fn refresh_credentials(
     };
 
     let outcome = perform_login(&params).await?;
-    persist_credentials(&outcome.credentials, profile_name)?;
+    let identity = crate::auth::credentials::credential_identity(
+        &params.tenant_id,
+        &params.app_id_uri,
+        Some(&outcome.role_arn),
+    );
+    persist_credentials(&outcome.credentials, profile_name, &identity)?;
     Ok(outcome.credentials)
 }
 
