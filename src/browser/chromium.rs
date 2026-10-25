@@ -158,6 +158,21 @@ fn decode_cookie_store(
     Ok(Some(store))
 }
 
+/// Decide whether a cookie-injection failure stops the sign-in.
+///
+/// Headless sign-in cannot succeed without the cookies, so it fails now
+/// instead of waiting for the timeout. A visible browser carries on.
+fn cookie_injection_outcome(injected: Result<bool>, headless: bool) -> Result<()> {
+    match injected {
+        Ok(_) => Ok(()),
+        Err(e) if headless => Err(e),
+        Err(e) => {
+            tracing::debug!("Cookie injection skipped: {}", e);
+            Ok(())
+        }
+    }
+}
+
 /// Path to the legacy plaintext cookie file (pre-encryption awzars).
 fn legacy_cookie_path(profile: &str) -> Result<std::path::PathBuf> {
     Ok(config::chromium_data_dir(profile)?.join("cookies.json"))
@@ -444,13 +459,8 @@ impl AzureLoginBrowser {
         // Headed and headless local sessions both reuse the encrypted cookie
         // store, including when it replaces a persistent user-data directory.
         if !self.is_remote {
-            match self.inject_cookies_from_store(browser).await {
-                Ok(_) => {}
-                // Headless sign-in cannot succeed without the cookies; fail
-                // now instead of waiting for the timeout.
-                Err(e) if self.headless => return Err(e),
-                Err(e) => tracing::debug!("Cookie injection skipped: {}", e),
-            }
+            let injected = self.inject_cookies_from_store(browser).await;
+            cookie_injection_outcome(injected, self.headless)?;
         }
 
         // Build Azure AD login URL (validates tenant_id is a UUID)
@@ -1036,6 +1046,20 @@ mod tests {
         assert!(decode_cookie_store(profile, &contents, false)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn cookie_injection_failure_stops_only_headless_sign_in() {
+        let failure = || Err(AwzarsError::Browser("injection failed".into()));
+        for headless in [true, false] {
+            assert!(cookie_injection_outcome(Ok(true), headless).is_ok());
+            assert!(cookie_injection_outcome(Ok(false), headless).is_ok());
+        }
+        match cookie_injection_outcome(failure(), true) {
+            Err(AwzarsError::Browser(msg)) => assert_eq!(msg, "injection failed"),
+            other => panic!("expected the injection error, got {:?}", other),
+        }
+        assert!(cookie_injection_outcome(failure(), false).is_ok());
     }
 
     #[test]
