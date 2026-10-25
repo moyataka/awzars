@@ -1,6 +1,6 @@
 # Contributing to awzars
 
-Thanks for helping. awzars handles cloud credentials, so we keep changes small and well tested, and we review them carefully.
+Thanks for helping. awzars handles cloud credentials, so we keep changes small and well tested, and we review them.
 
 ## Before you start
 
