@@ -10,6 +10,8 @@ Thanks for helping. awzars handles cloud credentials, so we keep changes small a
 - **Want a feature or a behaviour change?** Open an issue to discuss it before writing code.
 - **Adding a dependency** (a new crate or a new crate feature) needs a maintainer's agreement in the issue first.
 
+New issues use the bug report or feature request form, and new pull requests start from a checklist template; fill in every required field.
+
 ## Labels
 
 Each issue and pull request gets one type label and any extra labels that apply. Maintainers set them if you can't.

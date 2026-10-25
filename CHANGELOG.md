@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Continuous integration: formatting on Linux, lints and tests on Linux and macOS, a static Linux build, and dependency checks (cargo-deny) (#36).
 - Tag-driven release workflow: pushing a `v*` tag builds macOS and static Linux binaries with checksums and build provenance, as a draft release.
 - Contributor guide (`CONTRIBUTING.md`) (#56).
+- Issue forms and a pull request template (#57).
 
 ### Changed
 - A missing role now reports the closest available roles and how to fix the profile, instead of `Principal not found` (#33).
