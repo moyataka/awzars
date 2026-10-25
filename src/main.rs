@@ -204,6 +204,15 @@ mod tests {
     }
 
     #[test]
+    fn default_filter_per_verbosity() {
+        assert_eq!(default_log_filter(0), "warn,chromiumoxide::handler=error");
+        assert_eq!(default_log_filter(1), "info");
+        assert_eq!(default_log_filter(2), "debug");
+        assert_eq!(default_log_filter(3), "trace");
+        assert_eq!(default_log_filter(u8::MAX), "trace");
+    }
+
+    #[test]
     fn verbose_filter_shows_cdp_invalid_message_warnings() {
         for verbose in 1..=3 {
             assert!(enabled_under(default_log_filter(verbose), || {
