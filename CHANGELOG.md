@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - `configure` now keeps a profile's other settings when updating an existing profile.
+- Headless sign-in with a saved browser session that cannot be decrypted now fails at once and says to run `awzars login --remember-me`, instead of waiting for the timeout (#46).
 
 ### Security
 - Dependencies updated for RustSec advisories RUSTSEC-2026-0381, -0382, -0385 and -0386 (#39).
