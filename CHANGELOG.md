@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A missing role now reports the closest available roles and how to fix the profile, instead of `Principal not found` (#33).
 - Dependencies refreshed and an unused browser-download feature removed.
 - Documentation updated to match current behaviour (platform support, session unlock tokens, refresh lock, role fallback, remote Chrome).
+- `clear-cache` now keeps the remembered browser session; use `delete-profile` to remove it (#43).
 
 ### Fixed
 - `configure` now keeps a profile's other settings when updating an existing profile.

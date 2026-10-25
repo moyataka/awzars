@@ -465,7 +465,7 @@ under `$XDG_RUNTIME_DIR` go at logout.
 
 ```
 awzars list-roles         # list available AWS roles (interactive role browser)
-awzars clear-cache        # drop the profile's cached and keyring-stored credentials, incl. the cookie key (prompts; --yes to skip)
+awzars clear-cache        # drop the profile's stored credentials; keeps the remembered browser session (prompts; --yes to skip)
 awzars delete-profile     # drop awzars profile + keyring entries + cookies (does NOT touch ~/.aws/config)
 ```
 

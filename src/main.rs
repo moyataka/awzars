@@ -58,7 +58,7 @@ async fn run(args: Args) -> awzars::error::Result<()> {
         Command::ClearCache { yes } => {
             if !*yes {
                 let prompt = format!(
-                    "Clear cached credentials for profile '{}'? Next AWS call will require browser re-auth.",
+                    "Clear cached credentials for profile '{}'? Next AWS call will sign in again (silently if the browser session is remembered).",
                     args.profile
                 );
                 let confirmed = dialoguer::Confirm::new()
@@ -73,12 +73,10 @@ async fn run(args: Args) -> awzars::error::Result<()> {
                     return Ok(());
                 }
             }
-            awzars::storage::cache::clear_profile_cache(&args.profile)?;
-            let keyring = awzars::storage::keyring::KeyringStorage::new(&args.profile)?;
-            keyring.delete_credentials()?;
+            awzars::config::cleanup::clear_stored_credentials(&args.profile)?;
             if !args.quiet {
                 println!(
-                    "Cache and keyring credentials cleared for profile '{}'",
+                    "Stored credentials cleared for profile '{}'; the remembered browser session is kept",
                     args.profile
                 );
             }

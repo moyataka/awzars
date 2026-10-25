@@ -113,6 +113,15 @@ pub fn invalidate_cached_credentials(name: &str) -> Vec<String> {
     warnings
 }
 
+/// Drop a profile's cached and keyring-stored STS credentials for
+/// `clear-cache`. The cookie key is kept, so the remembered browser session
+/// still works; `delete-profile` removes it.
+pub fn clear_stored_credentials(name: &str) -> Result<()> {
+    crate::storage::cache::clear_profile_cache(name)?;
+    let keyring = crate::storage::keyring::KeyringStorage::new(name)?;
+    keyring.delete_session_credentials()
+}
+
 /// Whether a profile edit changed any field that the cached STS session was
 /// minted against. A `true` answer means existing credentials are no longer
 /// valid for the configured identity and must be invalidated.

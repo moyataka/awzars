@@ -227,7 +227,8 @@ fn rotate_if_needed(store: &mut CachedStore) -> Result<bool> {
         .and_then(NonZeroU8::new)
         .ok_or_else(|| {
             AwzarsError::Storage(
-                "Cookie key id space exhausted (255 rotations); run `awzars clear-cache` to reset"
+                "Cookie key id space exhausted (255 rotations); run `awzars delete-profile` \
+                 and configure the profile again to reset"
                     .into(),
             )
         })?;
