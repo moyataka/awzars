@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Dependencies refreshed and an unused browser-download feature removed.
 - Documentation updated to match current behaviour (platform support, session unlock tokens, refresh lock, role fallback, remote Chrome).
 - `clear-cache` now keeps the remembered browser session; use `delete-profile` to remove it (#43).
+- Login output no longer shows repeated `WS Invalid message` warnings from the browser connection (#48).
 
 ### Fixed
 - `configure` now keeps a profile's other settings when updating an existing profile.

@@ -21,12 +21,7 @@ async fn main() -> ExitCode {
     }
 
     // Setup logging
-    let log_level = match args.verbose {
-        0 => "warn",
-        1 => "info",
-        2 => "debug",
-        _ => "trace",
-    };
+    let log_level = default_log_filter(args.verbose);
 
     let log_filter = if args.quiet {
         EnvFilter::new("error")
@@ -128,6 +123,21 @@ fn install_panic_hook() {
     }));
 }
 
+/// Default log filter used when `RUST_LOG` is not set.
+///
+/// At the default level, chromiumoxide's handler is held to `error`: it logs a
+/// `WS Invalid message` warning for every CDP message it cannot parse, which is
+/// harmless during login (#48). Its only other event at warn or above is the
+/// connection error, which still shows. `-v` or `RUST_LOG` shows the warnings.
+fn default_log_filter(verbose: u8) -> &'static str {
+    match verbose {
+        0 => "warn,chromiumoxide::handler=error",
+        1 => "info",
+        2 => "debug",
+        _ => "trace",
+    }
+}
+
 fn error_to_exit_code(e: &AwzarsError) -> u8 {
     match e {
         AwzarsError::Config(_) => 2,
@@ -156,5 +166,58 @@ fn error_to_exit_code(e: &AwzarsError) -> u8 {
         AwzarsError::LockRequiresTty => 10,
         AwzarsError::RefreshLockTimeout { .. } => 5,
         AwzarsError::SessionUnlockUnavailable => 11,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracing::Level;
+    use tracing_subscriber::prelude::*;
+
+    /// Evaluates `check` with `filter` installed as the active subscriber.
+    fn enabled_under(filter: &str, check: impl FnOnce() -> bool) -> bool {
+        let subscriber = tracing_subscriber::registry().with(EnvFilter::new(filter));
+        tracing::subscriber::with_default(subscriber, check)
+    }
+
+    #[test]
+    fn default_filter_hides_cdp_invalid_message_warnings() {
+        let filter = default_log_filter(0);
+        assert!(!enabled_under(filter, || tracing::enabled!(
+            target: "chromiumoxide::handler",
+            Level::WARN
+        )));
+        // The handler's connection error and other warnings still show.
+        assert!(enabled_under(filter, || tracing::enabled!(
+            target: "chromiumoxide::handler",
+            Level::ERROR
+        )));
+        assert!(enabled_under(filter, || tracing::enabled!(
+            target: "chromiumoxide::browser",
+            Level::WARN
+        )));
+        assert!(enabled_under(filter, || tracing::enabled!(
+            target: "awzars",
+            Level::WARN
+        )));
+    }
+
+    #[test]
+    fn default_filter_per_verbosity() {
+        assert_eq!(default_log_filter(0), "warn,chromiumoxide::handler=error");
+        assert_eq!(default_log_filter(1), "info");
+        assert_eq!(default_log_filter(2), "debug");
+        assert_eq!(default_log_filter(3), "trace");
+        assert_eq!(default_log_filter(u8::MAX), "trace");
+    }
+
+    #[test]
+    fn verbose_filter_shows_cdp_invalid_message_warnings() {
+        for verbose in 1..=3 {
+            assert!(enabled_under(default_log_filter(verbose), || {
+                tracing::enabled!(target: "chromiumoxide::handler", Level::WARN)
+            }));
+        }
     }
 }
