@@ -55,15 +55,11 @@ pub async fn execute(args: &Args) -> Result<()> {
         session_duration,
     };
 
-    // Create or update profile
-    let profile = Profile {
-        azure: azure_config,
-        role_arn,
-        remember_me,
-        ..Default::default()
-    };
-
     let prev_profile = config.profiles.get(&args.profile).cloned();
+
+    // Create or update profile
+    let profile = build_profile(prev_profile.as_ref(), azure_config, role_arn, remember_me);
+
     let identity_changed = prev_profile
         .as_ref()
         .map(|prev| crate::config::cleanup::credential_identity_changed(prev, &profile))
@@ -100,6 +96,22 @@ pub async fn execute(args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Build the profile to save from the values `configure` collected.
+/// An existing profile keeps every setting `configure` does not ask for.
+fn build_profile(
+    existing: Option<&Profile>,
+    azure: AzureConfig,
+    role_arn: Option<String>,
+    remember_me: Option<bool>,
+) -> Profile {
+    Profile {
+        azure,
+        role_arn,
+        remember_me,
+        ..existing.cloned().unwrap_or_default()
+    }
 }
 
 /// (tenant_id, app_id_uri, role_arn, session_duration, remember_me)
@@ -194,4 +206,100 @@ fn interactive_configure(
         session_duration,
         Some(remember_me),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_profile_keeps_existing_settings_on_update() {
+        let existing = Profile {
+            azure: AzureConfig {
+                tenant_id: "old-tenant".into(),
+                app_id_uri: "https://old.example/app".into(),
+                default_role_arn: Some("arn:aws:iam::1:role/Old".into()),
+                session_duration: 7200,
+            },
+            region: Some("eu-west-1".into()),
+            role_arn: Some("arn:aws:iam::1:role/Old".into()),
+            principal_arn: Some("arn:aws:iam::1:saml-provider/Test".into()),
+            remember_me: Some(false),
+            headless: Some(true),
+            no_sandbox: Some(true),
+            allow_insecure_remote_chrome: Some(true),
+            lock_verifier: Some("$argon2id$test".into()),
+            lock_ttl_hours: Some(12),
+            lock_ai_markers: Some(vec!["TEST_MARKER".into()]),
+        };
+        let azure = AzureConfig {
+            tenant_id: "new-tenant".into(),
+            app_id_uri: "https://new.example/app".into(),
+            default_role_arn: Some("arn:aws:iam::1:role/New".into()),
+            session_duration: 3600,
+        };
+
+        let updated = build_profile(
+            Some(&existing),
+            azure,
+            Some("arn:aws:iam::1:role/New".into()),
+            Some(true),
+        );
+
+        // Fields configure collects are replaced.
+        assert_eq!(updated.azure.tenant_id, "new-tenant");
+        assert_eq!(updated.azure.app_id_uri, "https://new.example/app");
+        assert_eq!(
+            updated.azure.default_role_arn.as_deref(),
+            Some("arn:aws:iam::1:role/New")
+        );
+        assert_eq!(updated.azure.session_duration, 3600);
+        assert_eq!(updated.role_arn.as_deref(), Some("arn:aws:iam::1:role/New"));
+        assert_eq!(updated.remember_me, Some(true));
+
+        // Everything else is kept.
+        assert_eq!(updated.region.as_deref(), Some("eu-west-1"));
+        assert_eq!(
+            updated.principal_arn.as_deref(),
+            Some("arn:aws:iam::1:saml-provider/Test")
+        );
+        assert_eq!(updated.headless, Some(true));
+        assert_eq!(updated.no_sandbox, Some(true));
+        assert_eq!(updated.allow_insecure_remote_chrome, Some(true));
+        assert_eq!(updated.lock_verifier.as_deref(), Some("$argon2id$test"));
+        assert_eq!(updated.lock_ttl_hours, Some(12));
+        assert_eq!(
+            updated.lock_ai_markers.as_deref(),
+            Some(&["TEST_MARKER".to_string()][..])
+        );
+
+        // The identity comparison still sees the change.
+        assert!(crate::config::cleanup::credential_identity_changed(
+            &existing, &updated
+        ));
+    }
+
+    #[test]
+    fn build_profile_new_profile_uses_defaults() {
+        let azure = AzureConfig {
+            tenant_id: "tenant".into(),
+            app_id_uri: "https://example/app".into(),
+            default_role_arn: None,
+            session_duration: 3600,
+        };
+
+        let created = build_profile(None, azure, None, Some(true));
+
+        assert_eq!(created.azure.tenant_id, "tenant");
+        assert_eq!(created.remember_me, Some(true));
+        assert_eq!(created.role_arn, None);
+        assert_eq!(created.region, None);
+        assert_eq!(created.principal_arn, None);
+        assert_eq!(created.headless, None);
+        assert_eq!(created.no_sandbox, None);
+        assert_eq!(created.allow_insecure_remote_chrome, None);
+        assert_eq!(created.lock_verifier, None);
+        assert_eq!(created.lock_ttl_hours, None);
+        assert_eq!(created.lock_ai_markers, None);
+    }
 }

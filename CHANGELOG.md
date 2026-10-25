@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Dependencies refreshed and an unused browser-download feature removed.
 - Documentation updated to match current behaviour (platform support, session unlock tokens, refresh lock, role fallback, remote Chrome).
 
+### Fixed
+- `configure` now keeps a profile's other settings when updating an existing profile.
+
 ### Security
 - Dependencies updated for RustSec advisories RUSTSEC-2026-0381, -0382, -0385 and -0386 (#39).
 
