@@ -288,6 +288,39 @@ mod tests {
             response
         }
 
+        type StsError = SdkError<AssumeRoleWithSAMLError, HttpResponse>;
+
+        /// The log line of an error that never got a response.
+        fn no_response_line(variant: &str) -> String {
+            format!("variant={variant} code=none request_id=none status=none")
+        }
+
+        #[test]
+        fn construction_failure_logs_its_variant() {
+            let error = StsError::construction_failure(std::io::Error::other("cause"));
+            assert_eq!(
+                describe_sdk_error(&error),
+                no_response_line("ConstructionFailure")
+            );
+        }
+
+        #[test]
+        fn timeout_logs_its_variant() {
+            let error = StsError::timeout_error(std::io::Error::other("cause"));
+            assert_eq!(describe_sdk_error(&error), no_response_line("TimeoutError"));
+        }
+
+        #[test]
+        fn dispatch_failure_logs_its_variant() {
+            let error = StsError::dispatch_failure(aws_sdk_sts::error::ConnectorError::io(
+                Box::new(std::io::Error::other("cause")),
+            ));
+            assert_eq!(
+                describe_sdk_error(&error),
+                no_response_line("DispatchFailure")
+            );
+        }
+
         #[test]
         fn unparsed_success_body_stays_out_of_the_service_error_log() {
             let error: SdkError<AssumeRoleWithSAMLError, HttpResponse> = SdkError::service_error(
