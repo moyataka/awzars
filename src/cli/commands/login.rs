@@ -71,7 +71,8 @@ pub struct LoginParams {
     pub profile_name: String,
     pub tenant_id: String,
     pub app_id_uri: String,
-    /// If None and multiple roles are available, opens TUI selector.
+    /// If None, `perform_login` uses the only available role and fails when
+    /// there are several (it never prompts).
     pub role_arn: Option<String>,
     /// AWS region for the STS endpoint. Sourced from the awzars profile's
     /// `region`; `None` defers to the AWS default chain, then `us-east-1`.
@@ -1100,6 +1101,49 @@ mod tests {
             picked
         ));
         assert!(!reuse_after_role_pick(None, picked));
+    }
+
+    /// A valid SAML assertion offering `roles`.
+    fn assertion_with_roles(roles: &[&str]) -> SamlAssertion {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        const TENANT: &str = "11111111-2222-3333-4444-aaaaaaaaaaaa";
+        const AUDIENCE: &str = "https://signin.aws.amazon.com/saml";
+        let values: String = role_list(roles)
+            .iter()
+            .map(|(role, principal)| {
+                format!("<saml:AttributeValue>{role},{principal}</saml:AttributeValue>")
+            })
+            .collect();
+        let not_before = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        let not_on_or_after = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let xml = format!(
+            r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Assertion>
+    <saml:Issuer>https://sts.windows.net/{TENANT}/</saml:Issuer>
+    <saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}">
+      <saml:AudienceRestriction><saml:Audience>{AUDIENCE}</saml:Audience></saml:AudienceRestriction>
+    </saml:Conditions>
+    <saml:AttributeStatement>
+      <saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/Role">{values}</saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>"#
+        );
+        SamlAssertion::parse(&STANDARD.encode(xml), TENANT, AUDIENCE).unwrap()
+    }
+
+    #[test]
+    fn pick_role_without_a_request_never_prompts() {
+        let several = assertion_with_roles(&[CONFIGURED, "arn:aws:iam::123456789012:role/Other"]);
+        let error = pick_role(&several, None, "work").unwrap_err();
+        assert_eq!(error.to_string(), role_not_set("work").to_string());
+        // A single role is used without a prompt; a requested role is used as is.
+        let single = assertion_with_roles(&[CONFIGURED]);
+        assert_eq!(pick_role(&single, None, "work").unwrap(), CONFIGURED);
+        assert_eq!(
+            pick_role(&several, Some(CONFIGURED), "work").unwrap(),
+            CONFIGURED
+        );
     }
 
     fn role_list(roles: &[&str]) -> Vec<(String, String)> {
