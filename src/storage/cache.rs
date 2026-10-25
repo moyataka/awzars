@@ -18,6 +18,9 @@ struct CredentialCache {
 #[derive(Debug, Clone)]
 struct CachedCredential {
     credentials: CredentialProcessOutput,
+    /// Fingerprint of the identity the credentials were issued for
+    /// (see `auth::credentials::credential_identity`).
+    identity: String,
 }
 
 impl CredentialCache {
@@ -29,14 +32,33 @@ impl CredentialCache {
     }
 
     /// Store credentials
-    fn store(&mut self, profile: &str, credentials: CredentialProcessOutput) {
-        self.credentials
-            .insert(profile.to_string(), CachedCredential { credentials });
+    fn store(&mut self, profile: &str, credentials: CredentialProcessOutput, identity: &str) {
+        self.credentials.insert(
+            profile.to_string(),
+            CachedCredential {
+                credentials,
+                identity: identity.to_string(),
+            },
+        );
     }
 
     /// Get valid credentials (outside the refresh window for `lifetime_secs`)
-    fn get(&self, profile: &str, lifetime_secs: i64) -> Option<CredentialProcessOutput> {
+    /// issued for `identity`
+    fn get(
+        &self,
+        profile: &str,
+        lifetime_secs: i64,
+        identity: &str,
+    ) -> Option<CredentialProcessOutput> {
         let cached = self.credentials.get(profile)?;
+
+        if cached.identity != identity {
+            tracing::debug!(
+                "Cached credentials for profile {} were issued for another identity",
+                profile
+            );
+            return None;
+        }
 
         // Check expiration
         if !cached.credentials.is_valid(lifetime_secs) {
@@ -73,27 +95,29 @@ impl CacheHandle {
         })
     }
 
-    /// Store credentials in cache
-    pub fn store(&self, credentials: &CredentialProcessOutput) -> Result<()> {
+    /// Store credentials in cache, tagged with the fingerprint of the
+    /// identity they were issued for
+    pub fn store(&self, credentials: &CredentialProcessOutput, identity: &str) -> Result<()> {
         let mut cache = self
             .cache
             .lock()
             .map_err(|_| AwzarsError::Cache("Failed to lock cache".to_string()))?;
-        cache.store(&self.profile, credentials.clone());
+        cache.store(&self.profile, credentials.clone(), identity);
         Ok(())
     }
 
     /// Get valid credentials from cache for a session configured to last
-    /// `lifetime_secs`.
+    /// `lifetime_secs`. Credentials issued for another identity are a miss.
     pub fn get_valid_credentials(
         &self,
         lifetime_secs: i64,
+        identity: &str,
     ) -> Result<Option<CredentialProcessOutput>> {
         let cache = self
             .cache
             .lock()
             .map_err(|_| AwzarsError::Cache("Failed to lock cache".to_string()))?;
-        Ok(cache.get(&self.profile, lifetime_secs))
+        Ok(cache.get(&self.profile, lifetime_secs, identity))
     }
 
     /// Clear cached credentials
@@ -120,4 +144,42 @@ pub fn clear_all_caches() -> Result<()> {
         .map_err(|_| AwzarsError::Cache("Failed to lock cache".to_string()))?;
     cache.clear_all();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn credentials() -> CredentialProcessOutput {
+        CredentialProcessOutput::new("cached-key", "test-secret")
+            .with_session_token("test-token")
+            .with_expiration((chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339())
+    }
+
+    #[test]
+    fn credentials_are_returned_only_for_the_identity_they_were_issued_for() {
+        let role_a = crate::auth::credentials::credential_identity(
+            "tenant",
+            "app",
+            Some("arn:aws:iam::123456789012:role/A"),
+        );
+        let role_b = crate::auth::credentials::credential_identity(
+            "tenant",
+            "app",
+            Some("arn:aws:iam::123456789012:role/B"),
+        );
+        let profile = format!("identity_{}", uuid::Uuid::new_v4());
+        let cache = CacheHandle::new(&profile).unwrap();
+        cache.store(&credentials(), &role_a).unwrap();
+
+        assert!(cache
+            .get_valid_credentials(3600, &role_b)
+            .unwrap()
+            .is_none());
+        assert!(cache
+            .get_valid_credentials(3600, &role_a)
+            .unwrap()
+            .is_some());
+        cache.clear().unwrap();
+    }
 }

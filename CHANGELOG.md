@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - TUI: saving no longer changes the permissions of an existing AWS config directory (only a directory it creates is set to 0700), and an `aws_config_path` that is a bare file name now saves instead of failing (#45, #51).
 - The TUI and the profile-deletion orphan check now honour `AWS_CONFIG_FILE` when `aws_config_path` is not set, like the AWS CLI (#47).
 - `aws_config_path` and `AWS_CONFIG_FILE` expand a leading `~/` (#60).
+- Stored credentials are reused only for the tenant, app and role they were issued for; a profile whose identity changed re-authenticates (#41).
 
 ### Security
 - Dependencies updated for RustSec advisories RUSTSEC-2026-0381, -0382, -0385 and -0386 (#39).

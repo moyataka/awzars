@@ -168,24 +168,32 @@ pub(crate) mod test_support {
     /// profile valid credentials in the in-process cache.
     pub(crate) fn prepare_cached_default_profile(directory: &str) {
         config::set_config_dir_override(directory).unwrap();
-        let mut config = Config::default();
-        config.set_profile(
-            "default",
-            Profile {
-                lock_ai_markers: Some(vec![]),
-                ..Default::default()
-            },
+        let profile = Profile {
+            lock_ai_markers: Some(vec![]),
+            ..Default::default()
+        };
+        let identity = crate::auth::credentials::credential_identity(
+            &profile.azure.tenant_id,
+            &profile.azure.app_id_uri,
+            profile.role_arn.as_deref(),
         );
+        let mut config = Config::default();
+        config.set_profile("default", profile);
         config.save().unwrap();
         CacheHandle::new("default")
             .unwrap()
-            .store(&CredentialProcessOutput {
-                version: 1,
-                access_key_id: "cached-output".to_string(),
-                secret_access_key: "test-secret".to_string(),
-                session_token: Some("test-token".to_string()),
-                expiration: Some((chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339()),
-            })
+            .store(
+                &CredentialProcessOutput {
+                    version: 1,
+                    access_key_id: "cached-output".to_string(),
+                    secret_access_key: "test-secret".to_string(),
+                    session_token: Some("test-token".to_string()),
+                    expiration: Some(
+                        (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339(),
+                    ),
+                },
+                &identity,
+            )
             .unwrap();
     }
 

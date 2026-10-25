@@ -40,19 +40,26 @@ impl CredentialScope {
     fn load(
         self,
         profile: &str,
+        identity: &str,
         session_duration: i32,
         force_refresh: bool,
     ) -> Result<Option<CredentialProcessOutput>> {
         crate::auth::credentials::try_load_credentials(
             profile,
+            identity,
             session_duration,
             force_refresh || self == Self::Request,
         )
     }
 
-    fn persist(self, credentials: &CredentialProcessOutput, profile: &str) -> Result<()> {
+    fn persist(
+        self,
+        credentials: &CredentialProcessOutput,
+        profile: &str,
+        identity: &str,
+    ) -> Result<()> {
         match self {
-            Self::Profile => persist_credentials(credentials, profile),
+            Self::Profile => persist_credentials(credentials, profile, identity),
             Self::Request => Ok(()),
         }
     }
@@ -443,6 +450,14 @@ struct PickPersistence {
     save_role: bool,
 }
 
+impl PickPersistence {
+    /// Whether stored credentials must be re-checked (under the refresh
+    /// lock) after the role is chosen: only when this login stores them.
+    fn rechecks_stored_credentials(self) -> bool {
+        self.credentials == CredentialScope::Profile
+    }
+}
+
 /// Declining to save a role that replaced a missing configured one keeps
 /// the profile untouched: neither the role nor the credentials are stored,
 /// so the credentials serve only this invocation and credential-process
@@ -466,13 +481,15 @@ fn persistence_after_pick(
 
 /// Write fresh credentials to both the in-process cache and the OS
 /// keyring so subsequent calls (and subsequent processes) skip the
-/// browser flow.
+/// browser flow. `identity` is the fingerprint of the identity the
+/// credentials were issued for (the role actually used).
 pub(super) fn persist_credentials(
     credentials: &CredentialProcessOutput,
     profile: &str,
+    identity: &str,
 ) -> Result<()> {
-    CacheHandle::new(profile)?.store(credentials)?;
-    KeyringStorage::new(profile)?.store_credentials(credentials)?;
+    CacheHandle::new(profile)?.store(credentials, identity)?;
+    KeyringStorage::new(profile)?.store_credentials(credentials, identity)?;
     Ok(())
 }
 
@@ -497,7 +514,17 @@ pub async fn execute(args: &Args) -> Result<()> {
     let credential_scope = CredentialScope::for_login(&login_args);
     let session_duration = profile.azure.session_duration;
     let force_refresh = login_args.refresh_requested();
-    if let Some(creds) = credential_scope.load(&args.profile, session_duration, force_refresh)? {
+    let configured_identity = crate::auth::credentials::credential_identity(
+        &profile.azure.tenant_id,
+        &profile.azure.app_id_uri,
+        profile.role_arn.as_deref(),
+    );
+    if let Some(creds) = credential_scope.load(
+        &args.profile,
+        &configured_identity,
+        session_duration,
+        force_refresh,
+    )? {
         return output_credentials(&creds, &login_args, args.quiet);
     }
 
@@ -557,8 +584,13 @@ pub async fn execute(args: &Args) -> Result<()> {
     // profile's cookie keystore, a read-modify-write that must not interleave.
     let mut refresh_guard = Some(match credential_scope {
         CredentialScope::Profile => {
-            let (guard, refreshed) =
-                lock_and_recheck(&args.profile, session_duration, force_refresh).await?;
+            let (guard, refreshed) = lock_and_recheck(
+                &args.profile,
+                &configured_identity,
+                session_duration,
+                force_refresh,
+            )
+            .await?;
             if let Some(creds) = refreshed {
                 return output_credentials(&creds, &login_args, args.quiet);
             }
@@ -623,9 +655,19 @@ pub async fn execute(args: &Args) -> Result<()> {
             // Nothing is stored when the user declined to save the role, so
             // there is no stored state to re-check or protect: the browser
             // phase (cookie keystore) is over and STS needs no lock.
-            if persistence.credentials == CredentialScope::Profile {
-                let (guard, refreshed) =
-                    lock_and_recheck(&args.profile, session_duration, force_refresh).await?;
+            if persistence.rechecks_stored_credentials() {
+                let picked_identity = crate::auth::credentials::credential_identity(
+                    tenant_id,
+                    app_id_uri,
+                    Some(&role_arn),
+                );
+                let (guard, refreshed) = lock_and_recheck(
+                    &args.profile,
+                    &picked_identity,
+                    session_duration,
+                    force_refresh,
+                )
+                .await?;
                 if let Some(creds) = refreshed {
                     // Another login stored credentials while the role was being
                     // chosen. Reuse them when they are for the same role; otherwise
@@ -647,9 +689,14 @@ pub async fn execute(args: &Args) -> Result<()> {
     };
 
     let outcome = exchange_for_credentials(&params, &sign_in, role_arn).await?;
+    let used_identity = crate::auth::credentials::credential_identity(
+        &params.tenant_id,
+        &params.app_id_uri,
+        Some(&outcome.role_arn),
+    );
     persistence
         .credentials
-        .persist(&outcome.credentials, &args.profile)?;
+        .persist(&outcome.credentials, &args.profile, &used_identity)?;
 
     // Save the interactively-picked role so subsequent non-interactive
     // credential-process calls don't fail with "role_arn not set" (or keep
@@ -669,11 +716,13 @@ pub async fn execute(args: &Args) -> Result<()> {
 /// process may have refreshed them while this one prompted or waited.
 async fn lock_and_recheck(
     profile: &str,
+    identity: &str,
     session_duration: i32,
     force_refresh: bool,
 ) -> Result<(CredentialRefreshGuard, Option<CredentialProcessOutput>)> {
     let guard = CredentialRefreshGuard::acquire(profile).await?;
-    let stored = CredentialScope::Profile.load(profile, session_duration, force_refresh)?;
+    let stored =
+        CredentialScope::Profile.load(profile, identity, session_duration, force_refresh)?;
     Ok((guard, stored))
 }
 
@@ -793,18 +842,21 @@ mod tests {
         if let Ok(case) = std::env::var("AWZARS_QUIET_LOGIN_TEST") {
             let directory = std::env::var("AWZARS_QUIET_LOGIN_DIRECTORY").unwrap();
             config::set_config_dir_override(&directory).unwrap();
-            let mut config = Config::default();
-            config.set_profile(
-                "default",
-                crate::config::Profile {
-                    lock_ai_markers: Some(vec![]),
-                    ..Default::default()
-                },
+            let profile = crate::config::Profile {
+                lock_ai_markers: Some(vec![]),
+                ..Default::default()
+            };
+            let identity = crate::auth::credentials::credential_identity(
+                &profile.azure.tenant_id,
+                &profile.azure.app_id_uri,
+                profile.role_arn.as_deref(),
             );
+            let mut config = Config::default();
+            config.set_profile("default", profile);
             config.save().unwrap();
             CacheHandle::new("default")
                 .unwrap()
-                .store(&credentials("cached-output"))
+                .store(&credentials("cached-output"), &identity)
                 .unwrap();
             let mut arguments = vec!["awzars", "login"];
             if case != "normal" {
@@ -910,17 +962,22 @@ mod tests {
             }
             let profile = format!("override_{}", uuid::Uuid::new_v4());
             let cache = CacheHandle::new(&profile).unwrap();
-            cache.store(&credentials("original-role")).unwrap();
+            cache
+                .store(&credentials("original-role"), "identity")
+                .unwrap();
 
             let scope = CredentialScope::for_login(&arguments);
             assert_eq!(scope, CredentialScope::Request);
-            assert!(scope.load(&profile, 3600, false).unwrap().is_none());
+            assert!(scope
+                .load(&profile, "identity", 3600, false)
+                .unwrap()
+                .is_none());
             scope
-                .persist(&credentials("override-role"), &profile)
+                .persist(&credentials("override-role"), &profile, "identity")
                 .unwrap();
             assert_eq!(
                 cache
-                    .get_valid_credentials(3600)
+                    .get_valid_credentials(3600, "identity")
                     .unwrap()
                     .unwrap()
                     .access_key_id,
@@ -931,21 +988,79 @@ mod tests {
     }
 
     #[test]
+    fn persisted_credentials_load_back_only_for_their_identity() {
+        crate::storage::keyring::test_keychain::install();
+        let identity = |role: &str| {
+            crate::auth::credentials::credential_identity(
+                "tenant",
+                "app",
+                Some(&format!("arn:aws:iam::123456789012:role/{role}")),
+            )
+        };
+        let load = |profile: &str, role: &str| {
+            crate::auth::credentials::try_load_credentials(profile, &identity(role), 3600, false)
+                .unwrap()
+                .map(|creds| creds.access_key_id.clone())
+        };
+        for through_scope in [false, true] {
+            let profile = format!("roundtrip_{}", uuid::Uuid::new_v4());
+            if through_scope {
+                CredentialScope::Profile
+                    .persist(&credentials("persisted"), &profile, &identity("A"))
+                    .unwrap();
+            } else {
+                persist_credentials(&credentials("persisted"), &profile, &identity("A")).unwrap();
+            }
+            // In-memory cache.
+            assert_eq!(load(&profile, "B"), None);
+            assert_eq!(load(&profile, "A").as_deref(), Some("persisted"));
+            // Keyring alone.
+            CacheHandle::new(&profile).unwrap().clear().unwrap();
+            assert_eq!(load(&profile, "B"), None);
+            assert_eq!(load(&profile, "A").as_deref(), Some("persisted"));
+            CacheHandle::new(&profile).unwrap().clear().unwrap();
+        }
+    }
+
+    #[test]
+    fn role_pick_rechecks_only_credentials_this_login_stores() {
+        use CredentialScope::{Profile, Request};
+        for (scope, policy, answered_yes, rechecks) in [
+            (Profile, SavePicked::Yes, false, true),
+            (Profile, SavePicked::No, false, true),
+            (Profile, SavePicked::Ask, true, true),
+            (Profile, SavePicked::Ask, false, false),
+            (Request, SavePicked::No, false, false),
+        ] {
+            assert_eq!(
+                persistence_after_pick(scope, policy, answered_yes).rechecks_stored_credentials(),
+                rechecks,
+                "{scope:?} {policy:?} {answered_yes}"
+            );
+        }
+    }
+
+    #[test]
     fn ordinary_login_reuses_profile_credentials_unless_refreshing() {
         let profile = format!("ordinary_{}", uuid::Uuid::new_v4());
         let cache = CacheHandle::new(&profile).unwrap();
-        cache.store(&credentials("original-role")).unwrap();
+        cache
+            .store(&credentials("original-role"), "identity")
+            .unwrap();
         let scope = CredentialScope::for_login(&login_arguments());
         assert_eq!(scope, CredentialScope::Profile);
         assert_eq!(
             scope
-                .load(&profile, 3600, false)
+                .load(&profile, "identity", 3600, false)
                 .unwrap()
                 .unwrap()
                 .access_key_id,
             "original-role"
         );
-        assert!(scope.load(&profile, 3600, true).unwrap().is_none());
+        assert!(scope
+            .load(&profile, "identity", 3600, true)
+            .unwrap()
+            .is_none());
         cache.clear().unwrap();
     }
 

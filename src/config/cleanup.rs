@@ -217,16 +217,16 @@ mod tests {
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             );
         let handle = CacheHandle::new(profile).expect("cache handle");
-        handle.store(&creds).expect("cache store");
+        handle.store(&creds, "identity").expect("cache store");
         assert!(handle
-            .get_valid_credentials(3600)
+            .get_valid_credentials(3600, "identity")
             .expect("cache get")
             .is_some());
 
         let _warnings = invalidate_cached_credentials(profile);
 
         assert!(handle
-            .get_valid_credentials(3600)
+            .get_valid_credentials(3600, "identity")
             .expect("cache get after invalidate")
             .is_none());
     }

@@ -4,7 +4,29 @@ use crate::credential_process::protocol::CredentialProcessOutput;
 use crate::credential_process::protocol::Credentials;
 use crate::error::{AwzarsError, Result};
 use keyring::Entry;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
+
+/// The keychain JSON: the credential_process fields plus the fingerprint of
+/// the identity they were issued for (see
+/// `auth::credentials::credential_identity`). Kept apart from
+/// `CredentialProcessOutput` so `credential-process` output stays
+/// protocol-clean.
+#[derive(Serialize)]
+struct StoredCredentials<'a> {
+    #[serde(flatten)]
+    credentials: &'a CredentialProcessOutput,
+    #[serde(rename = "AwzarsIdentity")]
+    identity: &'a str,
+}
+
+/// The identity fingerprint of a stored entry; `None` for entries written
+/// before the fingerprint existed.
+#[derive(Deserialize)]
+struct StoredIdentity {
+    #[serde(rename = "AwzarsIdentity", default)]
+    identity: Option<String>,
+}
 
 /// Keychain storage for credentials
 pub struct KeyringStorage {
@@ -27,17 +49,16 @@ impl KeyringStorage {
     /// are left in place — touching them here would trigger extra macOS
     /// Keychain authorization dialogs on every login. They are cleaned up
     /// only by `delete_credentials`.
-    pub fn store_credentials(&self, credentials: &CredentialProcessOutput) -> Result<()> {
-        // Hold the serialized JSON in a Zeroizing wrapper so the heap buffer
-        // containing the secret access key + session token is wiped after we
-        // hand it to the OS keychain backend.
-        let json: Zeroizing<String> = Zeroizing::new(credentials.to_json().map_err(|e| {
-            AwzarsError::Keyring(format!("Failed to serialize credentials: {}", e))
-        })?);
+    ///
+    /// `identity` is the fingerprint of the identity the credentials were
+    /// issued for; `get_credentials` returns them only for that identity.
+    pub fn store_credentials(
+        &self,
+        credentials: &CredentialProcessOutput,
+        identity: &str,
+    ) -> Result<()> {
         let entry = self.entry_for_field("credentials")?;
-        entry
-            .set_password(&json)
-            .map_err(|e| AwzarsError::Keyring(format!("Failed to store credentials: {}", e)))?;
+        credentials_to_entry(&entry, credentials, identity)?;
 
         tracing::info!(
             "Credentials stored in keychain for profile: {}",
@@ -53,11 +74,13 @@ impl KeyringStorage {
     /// after a re-login will write the new format. Reading the legacy layout
     /// here would cost up to 4 macOS Keychain dialogs per call.
     ///
-    /// Returns `Ok(None)` only when no entry exists. Any other keychain error
-    /// is returned so the caller does not treat an unreadable entry as empty.
-    pub fn get_credentials(&self) -> Result<Option<Credentials>> {
+    /// Returns `Ok(None)` when no entry exists, or when the entry was issued
+    /// for another identity than `identity` or carries no identity (written
+    /// by an earlier version). Any other keychain error is returned so the
+    /// caller does not treat an unreadable entry as empty.
+    pub fn get_credentials(&self, identity: &str) -> Result<Option<Credentials>> {
         let entry = self.entry_for_field("credentials")?;
-        credentials_from_entry(&entry)
+        credentials_from_entry(&entry, identity)
     }
 
     /// Delete credentials from keychain
@@ -110,8 +133,81 @@ impl KeyringStorage {
     /// Create a keyring entry for a key
     pub fn entry_for_field(&self, key: &str) -> Result<Entry> {
         let username = format!("{}:{}", self.profile, key);
+        #[cfg(test)]
+        if let Some(entry) = test_keychain::entry(&self.service_name, &username) {
+            return Ok(entry);
+        }
         Entry::new(&self.service_name, &username)
             .map_err(|e| AwzarsError::Keyring(format!("Failed to create keyring entry: {}", e)))
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_keychain {
+    //! An in-memory keychain for the current test thread. Once `install`ed,
+    //! `KeyringStorage` uses it instead of the OS keychain. Unlike
+    //! `keyring::mock`, entries for the same service and user share their
+    //! secret, so a value stored through one entry reads back through
+    //! another.
+
+    use keyring::credential::CredentialApi;
+    use keyring::Entry;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    type Slot = Arc<Mutex<Option<Vec<u8>>>>;
+
+    thread_local! {
+        static ITEMS: RefCell<Option<HashMap<String, Slot>>> = const { RefCell::new(None) };
+    }
+
+    /// Route this thread's `KeyringStorage` entries to a fresh, empty store.
+    pub(crate) fn install() {
+        ITEMS.with(|items| *items.borrow_mut() = Some(HashMap::new()));
+    }
+
+    /// The entry for `service`/`user` in this thread's store, if installed.
+    pub(super) fn entry(service: &str, user: &str) -> Option<Entry> {
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            let slot = items
+                .as_mut()?
+                .entry(format!("{service}\0{user}"))
+                .or_default()
+                .clone();
+            Some(Entry::new_with_credential(Box::new(SharedCredential(slot))))
+        })
+    }
+
+    struct SharedCredential(Slot);
+
+    impl CredentialApi for SharedCredential {
+        fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+            *self.0.lock().unwrap() = Some(secret.to_vec());
+            Ok(())
+        }
+
+        fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+            self.0
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or(keyring::Error::NoEntry)
+        }
+
+        fn delete_credential(&self) -> keyring::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .take()
+                .map(|_| ())
+                .ok_or(keyring::Error::NoEntry)
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 }
 
@@ -137,12 +233,44 @@ pub fn read_secret(entry: &Entry, item: &str) -> Result<Option<Zeroizing<String>
     }
 }
 
-/// Deserialize the consolidated credentials JSON held in `entry`.
-fn credentials_from_entry(entry: &Entry) -> Result<Option<Credentials>> {
+/// Serialize `credentials` tagged with `identity` into `entry`.
+fn credentials_to_entry(
+    entry: &Entry,
+    credentials: &CredentialProcessOutput,
+    identity: &str,
+) -> Result<()> {
+    // Hold the serialized JSON in a Zeroizing wrapper so the heap buffer
+    // containing the secret access key + session token is wiped after we
+    // hand it to the OS keychain backend.
+    let stored = StoredCredentials {
+        credentials,
+        identity,
+    };
+    let json: Zeroizing<String> =
+        Zeroizing::new(serde_json::to_string(&stored).map_err(|e| {
+            AwzarsError::Keyring(format!("Failed to serialize credentials: {}", e))
+        })?);
+    entry
+        .set_password(&json)
+        .map_err(|e| AwzarsError::Keyring(format!("Failed to store credentials: {}", e)))
+}
+
+/// Deserialize the consolidated credentials JSON held in `entry`, if it was
+/// issued for `identity`.
+fn credentials_from_entry(entry: &Entry, identity: &str) -> Result<Option<Credentials>> {
     let json = match read_secret(entry, "the stored AWS credentials")? {
         Some(j) => j,
         None => return Ok(None),
     };
+    let stored: StoredIdentity = serde_json::from_str(&json)
+        .map_err(|e| AwzarsError::Keyring(format!("Failed to deserialize credentials: {}", e)))?;
+    if stored.identity.as_deref() != Some(identity) {
+        tracing::info!(
+            "Stored credentials were issued for another identity, or by an earlier \
+             version; re-authenticating"
+        );
+        return Ok(None);
+    }
     let output: CredentialProcessOutput = serde_json::from_str(&json)
         .map_err(|e| AwzarsError::Keyring(format!("Failed to deserialize credentials: {}", e)))?;
     Ok(Some(Credentials::from(output)))
@@ -204,7 +332,9 @@ mod tests {
     #[test]
     fn credentials_missing_entry_is_none() {
         let entry = mock_entry();
-        assert!(credentials_from_entry(&entry).unwrap().is_none());
+        assert!(credentials_from_entry(&entry, "identity")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -212,7 +342,66 @@ mod tests {
         for err in read_errors() {
             let entry = mock_entry();
             mock_of(&entry).set_error(err);
-            assert!(credentials_from_entry(&entry).is_err());
+            assert!(credentials_from_entry(&entry, "identity").is_err());
         }
+    }
+
+    fn credentials() -> CredentialProcessOutput {
+        CredentialProcessOutput::new("stored-key", "test-secret")
+            .with_session_token("test-token")
+            .with_expiration("2099-01-01T00:00:00Z")
+    }
+
+    #[test]
+    fn credentials_are_returned_only_for_the_identity_they_were_issued_for() {
+        let entry = mock_entry();
+        credentials_to_entry(&entry, &credentials(), "identity-a").unwrap();
+
+        assert!(credentials_from_entry(&entry, "identity-b")
+            .unwrap()
+            .is_none());
+        let stored = credentials_from_entry(&entry, "identity-a")
+            .unwrap()
+            .expect("credentials for the identity they were issued for");
+        assert_eq!(stored.access_key_id, "stored-key");
+    }
+
+    #[test]
+    fn stored_credentials_read_back_only_for_their_identity() {
+        test_keychain::install();
+        let storage =
+            KeyringStorage::new(&format!("keyring_roundtrip_{}", uuid::Uuid::new_v4())).unwrap();
+        storage
+            .store_credentials(&credentials(), "identity-a")
+            .unwrap();
+
+        assert!(storage.get_credentials("identity-b").unwrap().is_none());
+        let stored = storage
+            .get_credentials("identity-a")
+            .unwrap()
+            .expect("credentials for the identity they were issued for");
+        assert_eq!(stored.access_key_id, "stored-key");
+    }
+
+    #[test]
+    fn entry_without_an_identity_is_a_miss() {
+        // The layout written before identities were recorded.
+        let entry = mock_entry();
+        entry
+            .set_password(&credentials().to_json().unwrap())
+            .unwrap();
+        assert!(credentials_from_entry(&entry, "identity-a")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn stored_entry_keeps_the_credential_process_fields() {
+        let entry = mock_entry();
+        credentials_to_entry(&entry, &credentials(), "identity-a").unwrap();
+        let json = entry.get_password().unwrap();
+        let output: CredentialProcessOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(output.access_key_id, "stored-key");
+        assert!(json.contains("\"AwzarsIdentity\":\"identity-a\""), "{json}");
     }
 }
