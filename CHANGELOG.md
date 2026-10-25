@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `aws_config_path` and `AWS_CONFIG_FILE` expand a leading `~/` (#60).
 - Stored credentials are reused only for the tenant, app and role they were issued for; a profile whose identity changed re-authenticates (#41).
 - `login --credential-process` with no configured role and several roles available now fails with guidance instead of opening the role picker on stdout (#44).
+- STS failures that never reached the service (DNS, TLS, proxy, timeout) now show their cause instead of `AssumeRoleWithSAML failed: Unknown` (#42).
 
 ### Security
 - Dependencies updated for RustSec advisories RUSTSEC-2026-0381, -0382, -0385 and -0386 (#39).
