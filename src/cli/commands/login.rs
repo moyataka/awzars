@@ -450,6 +450,14 @@ struct PickPersistence {
     save_role: bool,
 }
 
+impl PickPersistence {
+    /// Whether stored credentials must be re-checked (under the refresh
+    /// lock) after the role is chosen: only when this login stores them.
+    fn rechecks_stored_credentials(self) -> bool {
+        self.credentials == CredentialScope::Profile
+    }
+}
+
 /// Declining to save a role that replaced a missing configured one keeps
 /// the profile untouched: neither the role nor the credentials are stored,
 /// so the credentials serve only this invocation and credential-process
@@ -647,7 +655,7 @@ pub async fn execute(args: &Args) -> Result<()> {
             // Nothing is stored when the user declined to save the role, so
             // there is no stored state to re-check or protect: the browser
             // phase (cookie keystore) is over and STS needs no lock.
-            if persistence.credentials == CredentialScope::Profile {
+            if persistence.rechecks_stored_credentials() {
                 let picked_identity = crate::auth::credentials::credential_identity(
                     tenant_id,
                     app_id_uri,
@@ -976,6 +984,59 @@ mod tests {
                 "original-role"
             );
             cache.clear().unwrap();
+        }
+    }
+
+    #[test]
+    fn persisted_credentials_load_back_only_for_their_identity() {
+        crate::storage::keyring::test_keychain::install();
+        let identity = |role: &str| {
+            crate::auth::credentials::credential_identity(
+                "tenant",
+                "app",
+                Some(&format!("arn:aws:iam::123456789012:role/{role}")),
+            )
+        };
+        let load = |profile: &str, role: &str| {
+            crate::auth::credentials::try_load_credentials(profile, &identity(role), 3600, false)
+                .unwrap()
+                .map(|creds| creds.access_key_id.clone())
+        };
+        for through_scope in [false, true] {
+            let profile = format!("roundtrip_{}", uuid::Uuid::new_v4());
+            if through_scope {
+                CredentialScope::Profile
+                    .persist(&credentials("persisted"), &profile, &identity("A"))
+                    .unwrap();
+            } else {
+                persist_credentials(&credentials("persisted"), &profile, &identity("A")).unwrap();
+            }
+            // In-memory cache.
+            assert_eq!(load(&profile, "B"), None);
+            assert_eq!(load(&profile, "A").as_deref(), Some("persisted"));
+            // Keyring alone.
+            CacheHandle::new(&profile).unwrap().clear().unwrap();
+            assert_eq!(load(&profile, "B"), None);
+            assert_eq!(load(&profile, "A").as_deref(), Some("persisted"));
+            CacheHandle::new(&profile).unwrap().clear().unwrap();
+        }
+    }
+
+    #[test]
+    fn role_pick_rechecks_only_credentials_this_login_stores() {
+        use CredentialScope::{Profile, Request};
+        for (scope, policy, answered_yes, rechecks) in [
+            (Profile, SavePicked::Yes, false, true),
+            (Profile, SavePicked::No, false, true),
+            (Profile, SavePicked::Ask, true, true),
+            (Profile, SavePicked::Ask, false, false),
+            (Request, SavePicked::No, false, false),
+        ] {
+            assert_eq!(
+                persistence_after_pick(scope, policy, answered_yes).rechecks_stored_credentials(),
+                rechecks,
+                "{scope:?} {policy:?} {answered_yes}"
+            );
         }
     }
 

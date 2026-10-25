@@ -133,8 +133,81 @@ impl KeyringStorage {
     /// Create a keyring entry for a key
     pub fn entry_for_field(&self, key: &str) -> Result<Entry> {
         let username = format!("{}:{}", self.profile, key);
+        #[cfg(test)]
+        if let Some(entry) = test_keychain::entry(&self.service_name, &username) {
+            return Ok(entry);
+        }
         Entry::new(&self.service_name, &username)
             .map_err(|e| AwzarsError::Keyring(format!("Failed to create keyring entry: {}", e)))
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_keychain {
+    //! An in-memory keychain for the current test thread. Once `install`ed,
+    //! `KeyringStorage` uses it instead of the OS keychain. Unlike
+    //! `keyring::mock`, entries for the same service and user share their
+    //! secret, so a value stored through one entry reads back through
+    //! another.
+
+    use keyring::credential::CredentialApi;
+    use keyring::Entry;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    type Slot = Arc<Mutex<Option<Vec<u8>>>>;
+
+    thread_local! {
+        static ITEMS: RefCell<Option<HashMap<String, Slot>>> = const { RefCell::new(None) };
+    }
+
+    /// Route this thread's `KeyringStorage` entries to a fresh, empty store.
+    pub(crate) fn install() {
+        ITEMS.with(|items| *items.borrow_mut() = Some(HashMap::new()));
+    }
+
+    /// The entry for `service`/`user` in this thread's store, if installed.
+    pub(super) fn entry(service: &str, user: &str) -> Option<Entry> {
+        ITEMS.with(|items| {
+            let mut items = items.borrow_mut();
+            let slot = items
+                .as_mut()?
+                .entry(format!("{service}\0{user}"))
+                .or_default()
+                .clone();
+            Some(Entry::new_with_credential(Box::new(SharedCredential(slot))))
+        })
+    }
+
+    struct SharedCredential(Slot);
+
+    impl CredentialApi for SharedCredential {
+        fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+            *self.0.lock().unwrap() = Some(secret.to_vec());
+            Ok(())
+        }
+
+        fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+            self.0
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or(keyring::Error::NoEntry)
+        }
+
+        fn delete_credential(&self) -> keyring::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .take()
+                .map(|_| ())
+                .ok_or(keyring::Error::NoEntry)
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 }
 
@@ -288,6 +361,23 @@ mod tests {
             .unwrap()
             .is_none());
         let stored = credentials_from_entry(&entry, "identity-a")
+            .unwrap()
+            .expect("credentials for the identity they were issued for");
+        assert_eq!(stored.access_key_id, "stored-key");
+    }
+
+    #[test]
+    fn stored_credentials_read_back_only_for_their_identity() {
+        test_keychain::install();
+        let storage =
+            KeyringStorage::new(&format!("keyring_roundtrip_{}", uuid::Uuid::new_v4())).unwrap();
+        storage
+            .store_credentials(&credentials(), "identity-a")
+            .unwrap();
+
+        assert!(storage.get_credentials("identity-b").unwrap().is_none());
+        let stored = storage
+            .get_credentials("identity-a")
             .unwrap()
             .expect("credentials for the identity they were issued for");
         assert_eq!(stored.access_key_id, "stored-key");
