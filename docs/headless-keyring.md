@@ -19,11 +19,12 @@ Error: Keyring error: Failed to store credentials:
 The Azure SAML auth **succeeded** — browser flow ran, STS returned credentials.
 It died on the *last* step: persisting to the OS keyring.
 
-- `perform_login` → `persist_credentials` writes the in-memory cache (fine) then
-  the keyring (`src/cli/commands/login.rs:170-174`).
-- The keyring write returns `Err`, which propagates with `?` out of
-  `perform_login` (`login.rs:66`) → `execute` (`login.rs:252`) **before** the
-  credentials are ever printed (output is at `login.rs:262`).
+- `persist_credentials` (`src/cli/commands/login.rs`) writes the in-memory
+  cache (fine) then the keyring.
+- The keyring write returns `Err`, which propagates with `?` out of `login`'s
+  `execute` **before** the credentials are printed (`output_credentials` runs
+  after persisting). `credential-process` behaves the same way: its
+  `refresh_credentials` persists before anything is written to stdout.
 - The in-memory cache dies with the process, so **the freshly-minted (MFA'd)
   credentials are discarded** — nothing survives.
 

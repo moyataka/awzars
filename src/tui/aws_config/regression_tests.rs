@@ -438,3 +438,366 @@ fn duplicate_and_default_sections_survive_editing_another_profile() {
         contents.replacen("us-west-2", "ap-southeast-2", 1)
     );
 }
+
+/// Names of the `config.bak.*` files next to `path`, sorted.
+fn backups(path: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("config.bak."))
+        .collect();
+    names.sort();
+    names
+}
+
+fn edit_region(path: &Path, region: &str) {
+    let before = load_aws_integration(path.to_str()).all_profiles[0].clone();
+    let mut after = before.clone();
+    after.region = Some(region.to_string());
+    save(path, &before, after);
+}
+
+#[test]
+fn saving_backs_up_the_previous_file_privately() {
+    let (_directory, path) = config_file(BASE);
+    edit_region(&path, "eu-central-1");
+
+    let backups = backups(&path);
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let backup = path.with_file_name(&backups[0]);
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), BASE);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // `config.bak.` + `YYYYMMDDTHHMMSS.mmmZ`
+    let timestamp = &backups[0]["config.bak.".len()..];
+    assert_eq!(timestamp.len(), 20, "{timestamp}");
+    assert_eq!(&timestamp[8..9], "T");
+    assert!(timestamp.ends_with('Z'));
+}
+
+#[test]
+fn no_backup_when_the_file_is_missing_or_unchanged() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config");
+    let profile = super::parse_aws_config(BASE).remove(0);
+    let op = AwsProfileOp::Upsert {
+        before: None,
+        after: profile.clone(),
+    };
+    save_aws_config(&op, path.to_str()).unwrap();
+    assert!(backups(&path).is_empty());
+
+    save_unchanged(&path, &[profile]);
+    assert!(backups(&path).is_empty());
+}
+
+#[test]
+fn backups_are_pruned_to_the_newest_ten_and_other_files_are_kept() {
+    let (directory, path) = config_file(BASE);
+    let old: Vec<String> = (0..12)
+        .map(|n| format!("config.bak.200001{:02}T000000.000Z", n + 1))
+        .collect();
+    let unrelated = [
+        "config.bak",
+        "config.bak-20261001-tag",
+        "config.bak.20000101T000000.000Z.orig",
+        "config.bak.notatimestamp",
+        "other.bak.20000101T000000.000Z",
+    ];
+    for name in old.iter().map(String::as_str).chain(unrelated) {
+        std::fs::write(directory.path().join(name), "old").unwrap();
+    }
+
+    edit_region(&path, "eu-central-1");
+
+    let backups = backups(&path);
+    let kept: Vec<&String> = backups.iter().filter(|name| old.contains(name)).collect();
+    assert_eq!(kept, old[3..].iter().collect::<Vec<_>>());
+    let new: Vec<&String> = backups
+        .iter()
+        .filter(|name| !old.contains(name) && !unrelated.contains(&name.as_str()))
+        .collect();
+    assert_eq!(new.len(), 1, "{backups:?}");
+    assert_eq!(
+        std::fs::read_to_string(path.with_file_name(new[0])).unwrap(),
+        BASE
+    );
+    for name in unrelated {
+        assert!(directory.path().join(name).exists(), "{name} was removed");
+    }
+}
+
+#[test]
+fn back_to_back_saves_keep_every_backup() {
+    let (_directory, path) = config_file(BASE);
+    for region in ["eu-central-1", "eu-west-1", "eu-west-2", "eu-west-3"] {
+        edit_region(&path, region);
+    }
+    assert_eq!(backups(&path).len(), 4);
+}
+
+#[test]
+fn a_backup_name_clash_gets_the_next_numeric_suffix() {
+    let (directory, path) = config_file(BASE);
+    let now = chrono::DateTime::parse_from_rfc3339("2026-10-25T10:15:30.123Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let stem = "config.bak.20261025T101530.123Z";
+    std::fs::write(directory.path().join(stem), "taken").unwrap();
+
+    for expected in ["-1", "-2"] {
+        super::backup_aws_config(&path, BASE, now).unwrap();
+        let backup = directory.path().join(format!("{stem}{expected}"));
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), BASE, "{expected}");
+    }
+    assert_eq!(
+        backups(&path),
+        [stem.to_string(), format!("{stem}-1"), format!("{stem}-2")]
+    );
+    let order = |suffix: &str| super::backup_order("config", &format!("{stem}{suffix}"));
+    assert!(order("") < order("-1") && order("-1") < order("-2"));
+}
+
+#[test]
+fn a_signed_clash_suffix_is_not_a_backup_and_survives_pruning() {
+    let (directory, path) = config_file(BASE);
+    let signed = "config.bak.20000101T000000.000Z-+5";
+    std::fs::write(directory.path().join(signed), "keep").unwrap();
+    for n in 0..12 {
+        let name = format!("config.bak.200001{:02}T000000.000Z", n + 1);
+        std::fs::write(directory.path().join(name), "old").unwrap();
+    }
+
+    edit_region(&path, "eu-central-1");
+
+    assert!(directory.path().join(signed).exists());
+    assert_eq!(backups(&path).len(), 11);
+}
+
+#[test]
+fn backup_names_match_strictly_and_clashes_sort_after_their_timestamp() {
+    let order = |file_name: &str| super::backup_order("config", file_name);
+    let base = "config.bak.20261025T101530.123Z";
+    assert_eq!(order(base), Some(("20261025T101530.123Z".to_string(), 0)));
+    assert!(order(&format!("{base}-2")) < order(&format!("{base}-10")));
+    for other in [
+        "config.bak.20261025T101530.123Z-",
+        "config.bak.20261025T101530.123Z-x",
+        "config.bak.20261025T101530.123Z-+5",
+        "config.bak.20261025T101530.123Z--1",
+        "config.bak.20261025T101530.123",
+        "config.bak.20261025-101530.123Z",
+        "config.bak-20261025-tag",
+        "configx.bak.20261025T101530.123Z",
+    ] {
+        assert_eq!(order(other), None, "{other}");
+    }
+}
+
+#[cfg(unix)]
+fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_leaves_an_existing_parent_directory_mode_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let parent = directory.path().join("shared");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = parent.join("config");
+    std::fs::write(&path, BASE).unwrap();
+
+    edit_region(&path, "eu-central-1");
+
+    assert_eq!(mode(&parent), 0o755);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_parent_directory_created_by_saving_is_private() {
+    let directory = tempfile::tempdir().unwrap();
+    let parent = directory.path().join("aws");
+    let path = parent.join("config");
+    let op = AwsProfileOp::Upsert {
+        before: None,
+        after: super::parse_aws_config(BASE).remove(0),
+    };
+
+    save_aws_config(&op, path.to_str()).unwrap();
+
+    assert_eq!(mode(&parent), 0o700);
+    assert_eq!(mode(&path), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_parent_directory_is_refused_without_writing_through_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let link = directory.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let op = AwsProfileOp::Upsert {
+        before: None,
+        after: super::parse_aws_config(BASE).remove(0),
+    };
+
+    let result = save_aws_config(&op, link.join("config").to_str());
+
+    assert!(
+        matches!(&result, Err(SaveError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied),
+        "{result:?}"
+    );
+    assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
+    assert_eq!(mode(&real), 0o755);
+}
+
+#[test]
+fn a_bare_relative_file_name_is_saved_in_the_working_directory() {
+    // Runs in a child process so changing the working directory cannot
+    // affect other tests.
+    const TEST_DIRECTORY: &str = "AWZARS_BARE_AWS_CONFIG_TEST";
+    if std::env::var_os(TEST_DIRECTORY).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        // Re-runs this test binary itself, not an external program.
+        let test_binary = std::env::current_exe().unwrap(); // nosemgrep: rust.lang.security.current-exe.current-exe
+        let output = std::process::Command::new(test_binary)
+            .args([
+                "--exact",
+                "tui::aws_config::regression_tests::a_bare_relative_file_name_is_saved_in_the_working_directory",
+            ])
+            .env(TEST_DIRECTORY, directory.path())
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(directory.path().join("config").is_file());
+        return;
+    }
+    let op = AwsProfileOp::Upsert {
+        before: None,
+        after: super::parse_aws_config(BASE).remove(0),
+    };
+    save_aws_config(&op, Some("config")).unwrap();
+}
+
+#[test]
+fn aws_config_file_applies_between_the_override_and_the_default() {
+    // Runs in child processes so setting AWS_CONFIG_FILE cannot race with
+    // other tests. The child reads its case from this variable.
+    const CASE: &str = "AWZARS_AWS_CONFIG_FILE_TEST";
+    let Some(case) = std::env::var_os(CASE) else {
+        let directory = tempfile::tempdir().unwrap();
+        let env_file = directory.path().join("from-env");
+        std::fs::write(&env_file, "[profile env]\nregion = us-east-1\n").unwrap();
+        for (case, value) in [("set", env_file.as_os_str()), ("empty", "".as_ref())] {
+            // Re-runs this test binary itself, not an external program.
+            let test_binary = std::env::current_exe().unwrap(); // nosemgrep: rust.lang.security.current-exe.current-exe
+            let output = std::process::Command::new(test_binary)
+                .args([
+                    "--exact",
+                    "tui::aws_config::regression_tests::aws_config_file_applies_between_the_override_and_the_default",
+                ])
+                .env(CASE, case)
+                .env("AWS_CONFIG_FILE", value)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+
+    let overridden = PathBuf::from("/override/config");
+    assert_eq!(
+        super::resolve_aws_config_path(overridden.to_str()),
+        Some(overridden)
+    );
+    if case == "set" {
+        let env_file = PathBuf::from(std::env::var_os("AWS_CONFIG_FILE").unwrap());
+        assert_eq!(super::resolve_aws_config_path(None), Some(env_file.clone()));
+        assert_eq!(super::resolve_aws_config_path(Some("")), Some(env_file));
+        let profiles = load_aws_integration(None).all_profiles;
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "env");
+    } else {
+        assert_eq!(
+            super::resolve_aws_config_path(None),
+            super::aws_config_path_default()
+        );
+    }
+}
+
+fn home() -> PathBuf {
+    directories::BaseDirs::new()
+        .unwrap()
+        .home_dir()
+        .to_path_buf()
+}
+
+#[test]
+fn aws_config_path_expands_a_leading_tilde_only() {
+    // Paths are only resolved here, never written.
+    let resolve = |path: &str| super::resolve_aws_config_path(Some(path)).unwrap();
+    assert_eq!(resolve("~/x"), home().join("x"));
+    assert_eq!(resolve("~/.aws/config"), home().join(".aws").join("config"));
+    assert_eq!(resolve("~"), home());
+    for unchanged in ["~user/z", "relative/config", "config", "/absolute/~/config"] {
+        assert_eq!(resolve(unchanged), PathBuf::from(unchanged), "{unchanged}");
+    }
+}
+
+#[test]
+fn aws_config_file_expands_a_leading_tilde() {
+    // Runs in a child process so setting AWS_CONFIG_FILE cannot race with
+    // other tests. Paths are only resolved, never written.
+    const CHILD: &str = "AWZARS_AWS_CONFIG_FILE_TILDE_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        for value in ["~/y", "~user/z", "relative/config"] {
+            // Re-runs this test binary itself, not an external program.
+            let test_binary = std::env::current_exe().unwrap(); // nosemgrep: rust.lang.security.current-exe.current-exe
+            let output = std::process::Command::new(test_binary)
+                .args([
+                    "--exact",
+                    "tui::aws_config::regression_tests::aws_config_file_expands_a_leading_tilde",
+                ])
+                .env(CHILD, "1")
+                .env("AWS_CONFIG_FILE", value)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{value}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
+
+    let value = std::env::var("AWS_CONFIG_FILE").unwrap();
+    let expected = match value.strip_prefix("~/") {
+        Some(rest) => home().join(rest),
+        None => PathBuf::from(&value),
+    };
+    assert_eq!(super::resolve_aws_config_path(None), Some(expected));
+}

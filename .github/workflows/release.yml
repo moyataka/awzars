@@ -1,0 +1,287 @@
+name: Release
+
+# Pushing a `vX.Y.Z` tag builds the release binaries, attests their build
+# provenance and creates a DRAFT GitHub release. A maintainer reviews the
+# draft and publishes it by hand. See "Releasing" in CLAUDE.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  # One release run per tag; never cancel a release that is in progress.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+# No build cache anywhere in this workflow: release binaries are built from a
+# clean state so a cache written by another workflow cannot influence them.
+
+jobs:
+  verify:
+    name: verify tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+      - name: Tag matches Cargo.toml version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Tag '$TAG' is not of the form vX.Y.Z or vX.Y.Z-<pre-release>"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          CARGO_VERSION=$(cargo metadata --no-deps --locked --format-version 1 \
+            | jq -r '.packages[] | select(.name == "awzars") | .version')
+          if [ "$CARGO_VERSION" != "$VERSION" ]; then
+            echo "::error::Tag $TAG does not match Cargo.toml version '$CARGO_VERSION'"
+            exit 1
+          fi
+          echo "Tag $TAG matches Cargo.toml version $CARGO_VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Tagged commit is on main
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          COMMIT=$(git rev-parse "refs/tags/$TAG^{commit}")
+          if ! git merge-base --is-ancestor "$COMMIT" origin/main; then
+            echo "::error::Tag $TAG ($COMMIT) is not reachable from origin/main. Tag a commit on main."
+            exit 1
+          fi
+          echo "Tag $TAG -> $COMMIT is on origin/main"
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Body of the "## [X.Y.Z]" section, up to the next "## [" heading or
+          # the link references at the end of the file, without the heading
+          # itself and without leading or trailing blank lines.
+          awk -v ver="$VERSION" '
+            BEGIN { hdr = "## [" ver "]"; n = 0 }
+            !found && index($0, hdr) == 1 &&
+              (length($0) == length(hdr) || substr($0, length(hdr) + 1, 1) == " ") {
+              found = 1; next
+            }
+            found && (/^## \[/ || /^\[[^]]+\]: /) { exit }
+            found { line[++n] = $0 }
+            END {
+              first = 1; while (first <= n && line[first] ~ /^[[:space:]]*$/) first++
+              last = n;  while (last >= first && line[last] ~ /^[[:space:]]*$/) last--
+              for (i = first; i <= last; i++) print line[i]
+            }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section (or it is empty)"
+            exit 1
+          fi
+          cat release-notes.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+          retention-days: 7
+      - name: cargo test
+        run: cargo test --all-targets --locked
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write # build provenance attestation (Sigstore OIDC)
+      attestations: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      ASSET: awzars-${{ needs.verify.outputs.tag }}-${{ matrix.target }}.tar.gz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (stable + ${{ matrix.target }})
+        run: |
+          rustup toolchain install stable --profile minimal -t "$TARGET"
+          rustup default stable
+          rustc -vV
+      # The verify job tests on Linux only; the macOS binary is tested on the
+      # runner that builds it, so a release never depends on another workflow.
+      - name: cargo test (macOS)
+        if: runner.os == 'macOS'
+        run: cargo test --all-targets --locked
+      - name: cargo build (macOS)
+        if: runner.os == 'macOS'
+        run: cargo build --release --locked --target "$TARGET"
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        if: runner.os == 'Linux'
+        with:
+          version: 0.17.0
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        if: runner.os == 'Linux'
+        with:
+          tool: cargo-zigbuild@0.23.4
+      - name: cargo zigbuild (Linux musl)
+        if: runner.os == 'Linux'
+        run: cargo zigbuild --release --locked --target "$TARGET"
+      - name: Check binary
+        run: |
+          BIN="target/$TARGET/release/awzars"
+          file "$BIN"
+          case "$TARGET" in
+            *-linux-musl)
+              if ! file "$BIN" | grep -Eq 'static-pie linked|statically linked'; then
+                echo "::error::$BIN is not statically linked; the musl release must have no dynamic dependencies"
+                exit 1
+              fi
+              ;;
+            aarch64-apple-darwin)
+              if ! file "$BIN" | grep -q 'Mach-O 64-bit executable arm64'; then
+                echo "::error::$BIN is not an arm64 Mach-O executable; check the macOS runner architecture"
+                exit 1
+              fi
+              ;;
+          esac
+          OUT=$("$BIN" --version)
+          echo "$OUT"
+          if [ "$OUT" != "awzars $VERSION" ]; then
+            echo "::error::'$BIN --version' printed '$OUT', expected 'awzars $VERSION'"
+            exit 1
+          fi
+      - name: Package
+        run: |
+          mkdir -p dist
+          chmod 0755 "target/$TARGET/release/awzars"
+          # Same layout as earlier releases: only `awzars` at the archive root,
+          # ustar format, owned by root:root (uid/gid 0).
+          if [ "$RUNNER_OS" = macOS ]; then
+            COPYFILE_DISABLE=1 /usr/bin/tar --format ustar --no-mac-metadata --no-xattrs \
+              --uid 0 --gid 0 --uname root --gname root \
+              -czf "dist/$ASSET" -C "target/$TARGET/release" awzars
+          else
+            tar --format=ustar --owner=root:0 --group=root:0 \
+              -czf "dist/$ASSET" -C "target/$TARGET/release" awzars
+          fi
+          tar -tvzf "dist/$ASSET"
+          ENTRIES=$(tar -tzf "dist/$ASSET")
+          if [ "$ENTRIES" != "awzars" ]; then
+            echo "::error::$ASSET must contain only 'awzars', found: $ENTRIES"
+            exit 1
+          fi
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/${{ env.ASSET }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/${{ env.ASSET }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0 # already gzip-compressed
+
+  release:
+    name: draft release
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the draft release and upload its assets
+    # GH_TOKEN is set only on the steps that call `gh`.
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.verify.outputs.tag }}
+    steps:
+      - name: Refuse to overwrite an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The release list includes drafts for a token with push access, so
+          # a draft left by an earlier run is caught too.
+          EXISTING=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .html_url")
+          if [ -n "$EXISTING" ]; then
+            echo "::error::A release for $TAG already exists: $EXISTING. Delete it first to re-run."
+            exit 1
+          fi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: notes
+      - name: Checksums
+        working-directory: dist
+        run: |
+          for t in aarch64-apple-darwin x86_64-unknown-linux-musl; do
+            test -f "awzars-$TAG-$t.tar.gz" || { echo "::error::missing awzars-$TAG-$t.tar.gz"; exit 1; }
+          done
+          ls -l
+          LC_ALL=C sha256sum awzars-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Release notes
+        run: |
+          {
+            cat notes/release-notes.md
+            echo
+            echo
+            echo "### Assets"
+            echo "- \`awzars-$TAG-aarch64-apple-darwin.tar.gz\`: macOS on Apple silicon (unsigned)"
+            echo "- \`awzars-$TAG-x86_64-unknown-linux-musl.tar.gz\`: static Linux x86_64 binary"
+            echo "- \`SHA256SUMS\`: verify with \`shasum -a 256 -c SHA256SUMS\`"
+            echo
+            echo "Each archive has a GitHub build provenance attestation. Verify it with the GitHub CLI:"
+            echo
+            echo '```bash'
+            echo "gh attestation verify awzars-$TAG-<target>.tar.gz --repo $GH_REPO \\"
+            echo "  --signer-workflow $GH_REPO/.github/workflows/release.yml \\"
+            echo "  --source-ref refs/tags/$TAG"
+            echo '```'
+          } > notes/notes.md
+          cat notes/notes.md
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A tag with a pre-release suffix (vX.Y.Z-rc.1) becomes a pre-release.
+          PRERELEASE=()
+          case "$TAG" in *-*) PRERELEASE=(--prerelease) ;; esac
+          gh release create "$TAG" --draft "${PRERELEASE[@]}" --verify-tag --title "$TAG" \
+            --notes-file notes/notes.md \
+            "dist/awzars-$TAG-aarch64-apple-darwin.tar.gz" \
+            "dist/awzars-$TAG-x86_64-unknown-linux-musl.tar.gz" \
+            dist/SHA256SUMS

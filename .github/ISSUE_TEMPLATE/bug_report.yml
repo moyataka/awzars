@@ -1,0 +1,79 @@
+name: Bug report
+description: Something in awzars doesn't work as documented or expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Don't report security vulnerabilities here; contact a maintainer privately.
+
+        > [!IMPORTANT]
+        > This issue is public. Leave out account IDs, tenant and app IDs, role ARNs, profile names, emails, hostnames, and any token or SAML text. To add a log, run the command again with `-v` and redact the same details.
+  - type: input
+    id: version
+    attributes:
+      label: awzars version
+      description: Output of `awzars --version`.
+      placeholder: awzars 1.0.5
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: OS and architecture
+      options:
+        - macOS arm64
+        - Linux x86_64
+        - Linux arm64
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - Release binary
+        - Built with cargo
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command run
+      description: The exact command, with personal values replaced by placeholders.
+      placeholder: awzars --profile example login
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: What happened instead, including any error message and the exit code.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log output (optional)
+      description: Output of the command run with `-v`, redacted.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I removed account IDs, tenant IDs, tokens and other personal data.
+          required: true
+        - label: This is not a security vulnerability (those must be reported privately to a maintainer, not in a public issue).
+          required: true

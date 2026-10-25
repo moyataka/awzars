@@ -91,6 +91,18 @@ pub async fn execute(args: &Args) -> Result<()> {
             }
             println!();
             println!("Total: {} role(s)", roles.len());
+            if let Some(configured) = profile
+                .role_arn
+                .as_deref()
+                .filter(|role| assertion.principal_for_role(role).is_none())
+            {
+                eprintln!(
+                    "Note: role {configured} configured for profile '{p}' is not in this \
+                     SAML assertion. Run `awzars login --profile {p}` to pick another \
+                     role and save it.",
+                    p = args.profile
+                );
+            }
         }
     }
 

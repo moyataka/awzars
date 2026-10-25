@@ -6,7 +6,7 @@ mod document;
 mod regression_tests;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A single AWS profile entry from ~/.aws/config
 #[derive(Debug, Clone)]
@@ -132,8 +132,8 @@ impl AwsIntegrationData {
 
 /// Read and parse ~/.aws/config, extracting all profiles.
 ///
-/// `path_override` substitutes for the default `~/.aws/config` when set
-/// (sourced from `Config.aws_config_path`).
+/// `path_override` (sourced from `Config.aws_config_path`) takes precedence
+/// over `AWS_CONFIG_FILE`, which takes precedence over `~/.aws/config`.
 pub fn load_aws_integration(path_override: Option<&str>) -> AwsIntegrationData {
     let empty = AwsIntegrationData {
         all_profiles: Vec::new(),
@@ -170,16 +170,22 @@ pub fn load_aws_integration(path_override: Option<&str>) -> AwsIntegrationData {
 /// other sections and unchanged text byte-for-byte. Returns the settings whose
 /// outside change was overridden by this one.
 ///
-/// `path_override` substitutes for the default `~/.aws/config` when set.
+/// The path is resolved as in [`load_aws_integration`].
 ///
-/// On Unix the file is created with mode 0o600 and the parent directory
-/// is restricted to 0o700. The file is not a secret store but it contains
+/// On Unix the file is created with mode 0o600, and a parent directory that
+/// this function creates is restricted to 0o700; an existing one is left as
+/// it is. The file is not a secret store but it contains
 /// tenant IDs, app ID URIs, and role ARNs that aid reconnaissance, so it
 /// is kept private to the owning user.
 ///
-/// Writes are atomic: contents go to a sibling `<path>.tmp` first, then are
-/// renamed over the target. A crash mid-write leaves the previous AWS config
-/// intact rather than truncating it.
+/// Writes are atomic: contents go to a hidden temporary file in the same
+/// directory first, then are renamed over the target. A crash mid-write
+/// leaves the previous AWS config intact rather than truncating it.
+///
+/// Before a write that changes an existing file, the previous contents are
+/// copied to `<path>.bak.<YYYYMMDDTHHMMSS.mmmZ>` (UTC, mode 0o600) and only
+/// the newest [`BACKUP_COUNT`] such copies are kept. If the copy cannot be
+/// written, the save is aborted.
 pub fn save_aws_config(
     op: &AwsProfileOp,
     path_override: Option<&str>,
@@ -191,13 +197,17 @@ pub fn save_aws_config(
         )
     })?;
 
-    // Ensure ~/.aws/ directory exists with restricted permissions.
-    if let Some(parent) = path.parent() {
+    // Ensure ~/.aws/ directory exists; restrict it only if we create it. A
+    // bare file name has an empty parent: the working directory.
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         // Refuse to create or chmod through a symlink. A same-UID attacker
         // who plants ~/.aws as a symlink would otherwise have us tighten
         // permissions on the target outside the home directory.
-        if let Ok(meta) = std::fs::symlink_metadata(parent) {
-            if meta.file_type().is_symlink() {
+        match std::fs::symlink_metadata(parent) {
+            Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!(
@@ -207,12 +217,15 @@ pub fn save_aws_config(
                 )
                 .into());
             }
-        }
-        std::fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            Ok(_) => {}
+            Err(_) => {
+                std::fs::create_dir_all(parent)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+                }
+            }
         }
     }
 
@@ -232,22 +245,134 @@ pub fn save_aws_config(
         }
     }
 
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+    let (contents, exists) = match std::fs::read_to_string(&path) {
+        Ok(contents) => (contents, true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
         Err(error) => return Err(error.into()),
     };
     let (output, overridden) = document::Document::parse(&contents).apply(op)?;
+    if exists && output != contents {
+        backup_aws_config(&path, &contents, chrono::Utc::now())?;
+    }
     crate::util::atomic_write(&path, output.as_bytes(), 0o600)?;
     Ok(overridden)
 }
 
-/// Resolve the effective AWS config path: override > default.
+/// How many `<config>.bak.<timestamp>` copies `save_aws_config` keeps.
+const BACKUP_COUNT: usize = 10;
+
+/// Copy `contents` (the file as read before this save) to a new
+/// `<path>.bak.<timestamp>` named after `now`, then delete all but the
+/// newest [`BACKUP_COUNT`] backups of `path`.
+fn backup_aws_config(
+    path: &Path,
+    contents: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} has no usable file name", path.display()),
+            )
+        })?;
+    let stem = format!("{}.bak.{}", name, now.format("%Y%m%dT%H%M%S%.3fZ"));
+    let mut backup = path.with_file_name(&stem);
+    let mut clash = 0;
+    while std::fs::symlink_metadata(&backup).is_ok() {
+        clash += 1;
+        backup = path.with_file_name(format!("{}-{}", stem, clash));
+    }
+    crate::util::atomic_write(&backup, contents.as_bytes(), 0o600)?;
+
+    // Pruning is best effort: the new backup is already safely written.
+    let directory = backup
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Ok(());
+    };
+    let mut backups: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            let file_name = entry.file_name().into_string().ok()?;
+            let order = backup_order(name, &file_name)?;
+            Some((order, entry.path()))
+        })
+        .collect();
+    backups.sort();
+    let excess = backups.len().saturating_sub(BACKUP_COUNT);
+    for (_, old) in backups.into_iter().take(excess) {
+        let _ = std::fs::remove_file(old);
+    }
+    Ok(())
+}
+
+/// Sort key of `file_name` if it is exactly `<name>.bak.<YYYYMMDDTHHMMSS.mmmZ>`
+/// with an optional `-<n>` clash suffix, as written by [`backup_aws_config`].
+fn backup_order(name: &str, file_name: &str) -> Option<(String, u64)> {
+    let rest = file_name.strip_prefix(name)?.strip_prefix(".bak.")?;
+    let (timestamp, clash) = match rest.split_once('-') {
+        Some((timestamp, clash)) => {
+            if clash.is_empty() || !clash.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            (timestamp, clash.parse().ok()?)
+        }
+        None => (rest, 0),
+    };
+    let bytes = timestamp.as_bytes();
+    let digits = |range: std::ops::Range<usize>| bytes[range].iter().all(u8::is_ascii_digit);
+    let valid = bytes.len() == 20
+        && digits(0..8)
+        && bytes[8] == b'T'
+        && digits(9..15)
+        && bytes[15] == b'.'
+        && digits(16..19)
+        && bytes[19] == b'Z';
+    valid.then(|| (timestamp.to_string(), clash))
+}
+
+/// Resolve the effective AWS config path: override > `AWS_CONFIG_FILE` >
+/// default. Empty values are ignored. A leading `~/` (or a bare `~`) in the
+/// override or `AWS_CONFIG_FILE` is expanded to the home directory; other
+/// paths, including relative ones, are used as given.
 pub fn resolve_aws_config_path(override_path: Option<&str>) -> Option<PathBuf> {
-    override_path
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(aws_config_path_default)
+    if let Some(path) = override_path.filter(|s| !s.is_empty()) {
+        return expand_home(path);
+    }
+    match std::env::var_os("AWS_CONFIG_FILE").filter(|value| !value.is_empty()) {
+        Some(value) => match value.to_str() {
+            Some(path) => expand_home(path),
+            None => Some(PathBuf::from(value)),
+        },
+        None => aws_config_path_default(),
+    }
+}
+
+/// Expand a leading `~/` or a bare `~` to the home directory. Returns `None`
+/// when that is needed but the home directory cannot be resolved, for the
+/// same reason as [`aws_config_path_default`]: a literal `~` path would
+/// create a `~` directory in the cwd. `~user` is not expanded.
+fn expand_home(path: &str) -> Option<PathBuf> {
+    let rest = match path.strip_prefix('~') {
+        Some("") => "",
+        Some(rest) if rest.starts_with(['/', std::path::MAIN_SEPARATOR]) => {
+            rest.trim_start_matches(['/', std::path::MAIN_SEPARATOR])
+        }
+        _ => return Some(PathBuf::from(path)),
+    };
+    directories::BaseDirs::new().map(|bd| {
+        if rest.is_empty() {
+            bd.home_dir().to_path_buf()
+        } else {
+            bd.home_dir().join(rest)
+        }
+    })
 }
 
 /// Get the path to ~/.aws/config, or `None` if the home directory cannot be
