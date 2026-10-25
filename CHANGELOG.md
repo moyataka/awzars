@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The TUI and the profile-deletion orphan check now honour `AWS_CONFIG_FILE` when `aws_config_path` is not set, like the AWS CLI (#47).
 - `aws_config_path` and `AWS_CONFIG_FILE` expand a leading `~/` (#60).
 - Stored credentials are reused only for the tenant, app and role they were issued for; a profile whose identity changed re-authenticates (#41).
+- `login --credential-process` with no configured role and several roles available now fails with guidance instead of opening the role picker on stdout (#44).
 
 ### Security
 - Dependencies updated for RustSec advisories RUSTSEC-2026-0381, -0382, -0385 and -0386 (#39).
