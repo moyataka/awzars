@@ -71,7 +71,8 @@ pub struct LoginParams {
     pub profile_name: String,
     pub tenant_id: String,
     pub app_id_uri: String,
-    /// If None and multiple roles are available, opens TUI selector.
+    /// If None, `perform_login` uses the only available role and fails when
+    /// there are several (it never prompts).
     pub role_arn: Option<String>,
     /// AWS region for the STS endpoint. Sourced from the awzars profile's
     /// `region`; `None` defers to the AWS default chain, then `us-east-1`.
@@ -242,11 +243,14 @@ enum RoleDecision {
     Pick { missing: Option<String> },
     /// The requested role is not available and nobody can choose another.
     Fail(String),
+    /// No role is requested and nobody can choose one of several.
+    Unset,
 }
 
 /// Decide how to choose the role. A configured role that the assertion no
 /// longer offers falls back to a choice only when someone can make it; an
-/// explicit `--role-arn` never does.
+/// explicit `--role-arn` never does. With no role requested, a single role
+/// is used as is and several need someone to choose.
 fn resolve_role(
     roles: &[(String, String)],
     requested: Option<&str>,
@@ -254,7 +258,11 @@ fn resolve_role(
     interactive: bool,
 ) -> RoleDecision {
     let Some(requested) = requested else {
-        return RoleDecision::Pick { missing: None };
+        return if interactive || roles.len() <= 1 {
+            RoleDecision::Pick { missing: None }
+        } else {
+            RoleDecision::Unset
+        };
     };
     if roles.iter().any(|(role, _)| role == requested) {
         return RoleDecision::Use(requested.to_string());
@@ -282,20 +290,39 @@ fn role_pick_is_interactive(decision: &RoleDecision, available: usize) -> bool {
     match decision {
         RoleDecision::Pick { missing: Some(_) } => true,
         RoleDecision::Pick { missing: None } => available > 1,
-        RoleDecision::Use(_) | RoleDecision::Fail(_) => false,
+        RoleDecision::Use(_) | RoleDecision::Fail(_) | RoleDecision::Unset => false,
     }
 }
 
 /// Resolve the role ARN to use from the SAML assertion without prompting
-/// about a missing role (credential-process). With no role requested, the
-/// TUI selector opens (auto-selects when only one role is available).
+/// (credential-process). With no role requested, a single available role is
+/// used and several are an error.
 fn pick_role(assertion: &SamlAssertion, requested: Option<&str>, profile: &str) -> Result<String> {
     let roles = assertion.roles();
     match resolve_role(&roles, requested, RoleSource::Profile, false) {
         RoleDecision::Use(role) => Ok(role),
         RoleDecision::Fail(missing) => Err(role_not_in_assertion(profile, &missing, &roles)),
+        RoleDecision::Unset => Err(role_not_set(profile)),
         RoleDecision::Pick { missing } => choose_role(roles, missing.as_deref(), profile),
     }
+}
+
+/// The error for a login that needs a role chosen from several but cannot
+/// prompt (stdout carries the credential-process protocol, or there is no
+/// terminal).
+fn role_not_set(profile: &str) -> AwzarsError {
+    AwzarsError::Config(format!(
+        "role_arn is not set for profile '{p}' and the SAML assertion offers several \
+         roles. This login cannot prompt for one (--credential-process, or no terminal).\n\
+         \n\
+         Fix it one of two ways:\n  \
+         1. Pass the role: `awzars login --profile {p} --role-arn \
+         arn:aws:iam::<account>:role/<name>`.\n  \
+         2. Save it in the profile: `awzars configure --profile {p} \
+         --role-arn arn:aws:iam::<account>:role/<name>`, or run \
+         `awzars login --profile {p}` in a terminal and pick a role.",
+        p = profile,
+    ))
 }
 
 /// Let the user choose a role. When `missing` names the configured role the
@@ -624,6 +651,7 @@ pub async fn execute(args: &Args) -> Result<()> {
         RoleDecision::Fail(missing) => {
             return Err(role_not_in_assertion(&args.profile, &missing, &roles));
         }
+        RoleDecision::Unset => return Err(role_not_set(&args.profile)),
         RoleDecision::Pick { missing } if !waits_for_human => {
             choose_role(roles, missing.as_deref(), &args.profile)?
         }
@@ -1075,6 +1103,49 @@ mod tests {
         assert!(!reuse_after_role_pick(None, picked));
     }
 
+    /// A valid SAML assertion offering `roles`.
+    fn assertion_with_roles(roles: &[&str]) -> SamlAssertion {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        const TENANT: &str = "11111111-2222-3333-4444-aaaaaaaaaaaa";
+        const AUDIENCE: &str = "https://signin.aws.amazon.com/saml";
+        let values: String = role_list(roles)
+            .iter()
+            .map(|(role, principal)| {
+                format!("<saml:AttributeValue>{role},{principal}</saml:AttributeValue>")
+            })
+            .collect();
+        let not_before = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        let not_on_or_after = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let xml = format!(
+            r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Assertion>
+    <saml:Issuer>https://sts.windows.net/{TENANT}/</saml:Issuer>
+    <saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}">
+      <saml:AudienceRestriction><saml:Audience>{AUDIENCE}</saml:Audience></saml:AudienceRestriction>
+    </saml:Conditions>
+    <saml:AttributeStatement>
+      <saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/Role">{values}</saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>"#
+        );
+        SamlAssertion::parse(&STANDARD.encode(xml), TENANT, AUDIENCE).unwrap()
+    }
+
+    #[test]
+    fn pick_role_without_a_request_never_prompts() {
+        let several = assertion_with_roles(&[CONFIGURED, "arn:aws:iam::123456789012:role/Other"]);
+        let error = pick_role(&several, None, "work").unwrap_err();
+        assert_eq!(error.to_string(), role_not_set("work").to_string());
+        // A single role is used without a prompt; a requested role is used as is.
+        let single = assertion_with_roles(&[CONFIGURED]);
+        assert_eq!(pick_role(&single, None, "work").unwrap(), CONFIGURED);
+        assert_eq!(
+            pick_role(&several, Some(CONFIGURED), "work").unwrap(),
+            CONFIGURED
+        );
+    }
+
     fn role_list(roles: &[&str]) -> Vec<(String, String)> {
         roles
             .iter()
@@ -1129,14 +1200,35 @@ mod tests {
     }
 
     #[test]
-    fn resolve_role_without_a_request_picks_as_before() {
+    fn resolve_role_without_a_request_picks_only_when_someone_can_choose() {
         let roles = role_list(&[CONFIGURED, "arn:aws:iam::123456789012:role/Other"]);
+        assert_eq!(
+            resolve_role(&roles, None, RoleSource::Profile, true),
+            RoleDecision::Pick { missing: None }
+        );
+        // credential-process output or no terminal: never open the selector.
+        assert_eq!(
+            resolve_role(&roles, None, RoleSource::Profile, false),
+            RoleDecision::Unset
+        );
+        assert!(!role_pick_is_interactive(&RoleDecision::Unset, roles.len()));
+        // A single role is still selected without a prompt.
+        let single = role_list(&[CONFIGURED]);
         for interactive in [false, true] {
-            assert_eq!(
-                resolve_role(&roles, None, RoleSource::Profile, interactive),
-                RoleDecision::Pick { missing: None }
-            );
+            let decision = resolve_role(&single, None, RoleSource::Profile, interactive);
+            assert_eq!(decision, RoleDecision::Pick { missing: None });
+            assert!(!role_pick_is_interactive(&decision, single.len()));
         }
+    }
+
+    #[test]
+    fn role_not_set_points_to_role_arn_and_configure() {
+        let message = role_not_set("work").to_string();
+        assert!(message.contains("--role-arn"), "{message}");
+        assert!(
+            message.contains("awzars configure --profile work"),
+            "{message}"
+        );
     }
 
     #[test]
