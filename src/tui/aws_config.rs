@@ -172,8 +172,9 @@ pub fn load_aws_integration(path_override: Option<&str>) -> AwsIntegrationData {
 ///
 /// `path_override` substitutes for the default `~/.aws/config` when set.
 ///
-/// On Unix the file is created with mode 0o600 and the parent directory
-/// is restricted to 0o700. The file is not a secret store but it contains
+/// On Unix the file is created with mode 0o600, and a parent directory that
+/// this function creates is restricted to 0o700; an existing one is left as
+/// it is. The file is not a secret store but it contains
 /// tenant IDs, app ID URIs, and role ARNs that aid reconnaissance, so it
 /// is kept private to the owning user.
 ///
@@ -196,13 +197,17 @@ pub fn save_aws_config(
         )
     })?;
 
-    // Ensure ~/.aws/ directory exists with restricted permissions.
-    if let Some(parent) = path.parent() {
+    // Ensure ~/.aws/ directory exists; restrict it only if we create it. A
+    // bare file name has an empty parent: the working directory.
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         // Refuse to create or chmod through a symlink. A same-UID attacker
         // who plants ~/.aws as a symlink would otherwise have us tighten
         // permissions on the target outside the home directory.
-        if let Ok(meta) = std::fs::symlink_metadata(parent) {
-            if meta.file_type().is_symlink() {
+        match std::fs::symlink_metadata(parent) {
+            Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!(
@@ -212,12 +217,15 @@ pub fn save_aws_config(
                 )
                 .into());
             }
-        }
-        std::fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            Ok(_) => {}
+            Err(_) => {
+                std::fs::create_dir_all(parent)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+                }
+            }
         }
     }
 
