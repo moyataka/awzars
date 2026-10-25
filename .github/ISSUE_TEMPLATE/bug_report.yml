@@ -5,9 +5,10 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. **Security vulnerabilities must not be reported here:** contact a maintainer privately instead.
+        Thanks for reporting a bug. Don't report security vulnerabilities here; contact a maintainer privately.
 
-        This issue is public. Leave out account IDs, tenant and app IDs, role ARNs, profile names, emails, hostnames, and any token or SAML text.
+        > [!IMPORTANT]
+        > This issue is public. Leave out account IDs, tenant and app IDs, role ARNs, profile names, emails, hostnames, and any token or SAML text. To add a log, run the command again with `-v` and redact the same details.
   - type: input
     id: version
     attributes:
@@ -59,11 +60,6 @@ body:
       description: What happened instead, including any error message and the exit code.
     validations:
       required: true
-  - type: markdown
-    attributes:
-      value: |
-        > [!IMPORTANT]
-        > **Before you paste a log:** run the command again with `-v`, then redact account IDs, tenant and app IDs, role ARNs, emails, and any token or SAML text.
   - type: textarea
     id: log
     attributes:
