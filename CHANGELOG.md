@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 - Dependencies updated for RustSec advisories RUSTSEC-2026-0381, -0382, -0385 and -0386 (#39).
+- Login output no longer shows repeated `WS Invalid message` warnings from the browser connection (#48).
 
 ## [1.0.4] - 2026-10-20
 
