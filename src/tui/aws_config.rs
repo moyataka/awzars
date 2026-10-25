@@ -132,8 +132,8 @@ impl AwsIntegrationData {
 
 /// Read and parse ~/.aws/config, extracting all profiles.
 ///
-/// `path_override` substitutes for the default `~/.aws/config` when set
-/// (sourced from `Config.aws_config_path`).
+/// `path_override` (sourced from `Config.aws_config_path`) takes precedence
+/// over `AWS_CONFIG_FILE`, which takes precedence over `~/.aws/config`.
 pub fn load_aws_integration(path_override: Option<&str>) -> AwsIntegrationData {
     let empty = AwsIntegrationData {
         all_profiles: Vec::new(),
@@ -170,7 +170,7 @@ pub fn load_aws_integration(path_override: Option<&str>) -> AwsIntegrationData {
 /// other sections and unchanged text byte-for-byte. Returns the settings whose
 /// outside change was overridden by this one.
 ///
-/// `path_override` substitutes for the default `~/.aws/config` when set.
+/// The path is resolved as in [`load_aws_integration`].
 ///
 /// On Unix the file is created with mode 0o600, and a parent directory that
 /// this function creates is restricted to 0o700; an existing one is left as
@@ -337,11 +337,17 @@ fn backup_order(name: &str, file_name: &str) -> Option<(String, u64)> {
     valid.then(|| (timestamp.to_string(), clash))
 }
 
-/// Resolve the effective AWS config path: override > default.
+/// Resolve the effective AWS config path: override > `AWS_CONFIG_FILE` >
+/// default. Empty values are ignored.
 pub fn resolve_aws_config_path(override_path: Option<&str>) -> Option<PathBuf> {
     override_path
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("AWS_CONFIG_FILE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
         .or_else(aws_config_path_default)
 }
 

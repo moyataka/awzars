@@ -695,3 +695,52 @@ fn a_bare_relative_file_name_is_saved_in_the_working_directory() {
     };
     save_aws_config(&op, Some("config")).unwrap();
 }
+
+#[test]
+fn aws_config_file_applies_between_the_override_and_the_default() {
+    // Runs in child processes so setting AWS_CONFIG_FILE cannot race with
+    // other tests. The child reads its case from this variable.
+    const CASE: &str = "AWZARS_AWS_CONFIG_FILE_TEST";
+    let Some(case) = std::env::var_os(CASE) else {
+        let directory = tempfile::tempdir().unwrap();
+        let env_file = directory.path().join("from-env");
+        std::fs::write(&env_file, "[profile env]\nregion = us-east-1\n").unwrap();
+        for (case, value) in [("set", env_file.as_os_str()), ("empty", "".as_ref())] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tui::aws_config::regression_tests::aws_config_file_applies_between_the_override_and_the_default",
+                ])
+                .env(CASE, case)
+                .env("AWS_CONFIG_FILE", value)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+
+    let overridden = PathBuf::from("/override/config");
+    assert_eq!(
+        super::resolve_aws_config_path(overridden.to_str()),
+        Some(overridden)
+    );
+    if case == "set" {
+        let env_file = PathBuf::from(std::env::var_os("AWS_CONFIG_FILE").unwrap());
+        assert_eq!(super::resolve_aws_config_path(None), Some(env_file.clone()));
+        assert_eq!(super::resolve_aws_config_path(Some("")), Some(env_file));
+        let profiles = load_aws_integration(None).all_profiles;
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "env");
+    } else {
+        assert_eq!(
+            super::resolve_aws_config_path(None),
+            super::aws_config_path_default()
+        );
+    }
+}
