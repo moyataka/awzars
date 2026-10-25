@@ -99,7 +99,7 @@ src/
 │       ├── unlock.rs            # Unlock a locked profile (or grant AI consent) for the session
 │       ├── lock.rs              # Drop the session's unlock token
 │       └── tui.rs               # TUI command entry point
-│       # `clear-cache` is inline in main.rs (small enough not to warrant a module)
+│       # `clear-cache` is inline in main.rs; its cleanup is `config::cleanup::clear_stored_credentials`
 ├── browser/
 │   ├── chromium.rs              # chromiumoxide automation, cookie store, remote-Chrome connect
 │   ├── cookie_crypto.rs         # ChaCha20-Poly1305 cookie encryption with versioned key rotation
@@ -124,7 +124,7 @@ src/
 ├── config/
 │   ├── azure_config.rs          # AzureConfig (tenant_id, app_id_uri)
 │   ├── profile.rs               # Profile + Config structs, atomic TOML I/O, 0o600 perms
-│   └── cleanup.rs               # delete_awzars_profile: shared cleanup for CLI + TUI
+│   └── cleanup.rs               # delete_awzars_profile: shared cleanup for CLI + TUI; clear_stored_credentials for clear-cache
 ├── tui/
 │   ├── app.rs                   # ratatui role selector (mouse + search/filter)
 │   ├── aws_config.rs            # AWS config INI parser + atomic writer, configurable path, role_session_name
@@ -181,7 +181,7 @@ Credential freshness: stored credentials are reused until `min(15 min, session_d
 
 Configure options: `--azure-tenant`, `--azure-app`, `--role-arn`, `--session-duration`, `--non-interactive`
 
-Clear-cache options: `--yes` (skip confirmation prompt). Clears the in-process cache and the profile's keyring entries, including `cookie_key` (`KeyringStorage::delete_credentials`), so the saved `cookies.enc` can no longer be decrypted.
+Clear-cache options: `--yes` (skip confirmation prompt). Clears the in-process cache and the profile's stored STS credentials in the keyring (`config::cleanup::clear_stored_credentials` → `KeyringStorage::delete_session_credentials`). `cookie_key` is kept, so the remembered browser session (`cookies.enc`) still works; `delete-profile` removes it.
 
 Delete-profile options: `--yes` (skip confirmation prompt). Cleans up the awzars config entry, keyring credentials (incl. cookie key), in-memory cache, and the per-profile chromium dir. **Does not** modify `~/.aws/config` — AWS profiles still pointing at the deleted awzars profile are listed as a warning so they can be edited by hand.
 

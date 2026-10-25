@@ -73,12 +73,10 @@ async fn run(args: Args) -> awzars::error::Result<()> {
                     return Ok(());
                 }
             }
-            awzars::storage::cache::clear_profile_cache(&args.profile)?;
-            let keyring = awzars::storage::keyring::KeyringStorage::new(&args.profile)?;
-            keyring.delete_credentials()?;
+            awzars::config::cleanup::clear_stored_credentials(&args.profile)?;
             if !args.quiet {
                 println!(
-                    "Cache and keyring credentials cleared for profile '{}'",
+                    "Stored credentials cleared for profile '{}'; the remembered browser session is kept",
                     args.profile
                 );
             }
