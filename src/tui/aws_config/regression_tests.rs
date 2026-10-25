@@ -637,6 +637,31 @@ fn a_parent_directory_created_by_saving_is_private() {
     assert_eq!(mode(&path), 0o600);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_symlinked_parent_directory_is_refused_without_writing_through_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let link = directory.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let op = AwsProfileOp::Upsert {
+        before: None,
+        after: super::parse_aws_config(BASE).remove(0),
+    };
+
+    let result = save_aws_config(&op, link.join("config").to_str());
+
+    assert!(
+        matches!(&result, Err(SaveError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied),
+        "{result:?}"
+    );
+    assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
+    assert_eq!(mode(&real), 0o755);
+}
+
 #[test]
 fn a_bare_relative_file_name_is_saved_in_the_working_directory() {
     // Runs in a child process so changing the working directory cannot
@@ -644,7 +669,9 @@ fn a_bare_relative_file_name_is_saved_in_the_working_directory() {
     const TEST_DIRECTORY: &str = "AWZARS_BARE_AWS_CONFIG_TEST";
     if std::env::var_os(TEST_DIRECTORY).is_none() {
         let directory = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        // Re-runs this test binary itself, not an external program.
+        let test_binary = std::env::current_exe().unwrap(); // nosemgrep: rust.lang.security.current-exe.current-exe
+        let output = std::process::Command::new(test_binary)
             .args([
                 "--exact",
                 "tui::aws_config::regression_tests::a_bare_relative_file_name_is_saved_in_the_working_directory",
