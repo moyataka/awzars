@@ -597,3 +597,74 @@ fn backup_names_match_strictly_and_clashes_sort_after_their_timestamp() {
         assert_eq!(order(other), None, "{other}");
     }
 }
+
+#[cfg(unix)]
+fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_leaves_an_existing_parent_directory_mode_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let parent = directory.path().join("shared");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = parent.join("config");
+    std::fs::write(&path, BASE).unwrap();
+
+    edit_region(&path, "eu-central-1");
+
+    assert_eq!(mode(&parent), 0o755);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_parent_directory_created_by_saving_is_private() {
+    let directory = tempfile::tempdir().unwrap();
+    let parent = directory.path().join("aws");
+    let path = parent.join("config");
+    let op = AwsProfileOp::Upsert {
+        before: None,
+        after: super::parse_aws_config(BASE).remove(0),
+    };
+
+    save_aws_config(&op, path.to_str()).unwrap();
+
+    assert_eq!(mode(&parent), 0o700);
+    assert_eq!(mode(&path), 0o600);
+}
+
+#[test]
+fn a_bare_relative_file_name_is_saved_in_the_working_directory() {
+    // Runs in a child process so changing the working directory cannot
+    // affect other tests.
+    const TEST_DIRECTORY: &str = "AWZARS_BARE_AWS_CONFIG_TEST";
+    if std::env::var_os(TEST_DIRECTORY).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tui::aws_config::regression_tests::a_bare_relative_file_name_is_saved_in_the_working_directory",
+            ])
+            .env(TEST_DIRECTORY, directory.path())
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(directory.path().join("config").is_file());
+        return;
+    }
+    let op = AwsProfileOp::Upsert {
+        before: None,
+        after: super::parse_aws_config(BASE).remove(0),
+    };
+    save_aws_config(&op, Some("config")).unwrap();
+}
