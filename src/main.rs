@@ -58,7 +58,7 @@ async fn run(args: Args) -> awzars::error::Result<()> {
         Command::ClearCache { yes } => {
             if !*yes {
                 let prompt = format!(
-                    "Clear cached credentials for profile '{}'? Next AWS call will require browser re-auth.",
+                    "Clear cached credentials for profile '{}'? Next AWS call will sign in again (silently if the browser session is remembered).",
                     args.profile
                 );
                 let confirmed = dialoguer::Confirm::new()
