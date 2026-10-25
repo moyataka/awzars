@@ -48,7 +48,7 @@ fn sts_error_message(error: &SdkError<AssumeRoleWithSAMLError, HttpResponse>) ->
         SdkError::ConstructionFailure(_)
         | SdkError::TimeoutError(_)
         | SdkError::DispatchFailure(_) => sanitize_error_detail(&error_chain(error)),
-        _ => error.to_string(),
+        _ => sanitize_error_detail(&error.to_string()),
     }
 }
 
@@ -243,7 +243,7 @@ mod tests {
     }
 
     mod error_message {
-        use super::super::sts_error_message;
+        use super::super::{sanitize_error_detail, sts_error_message};
         use aws_sdk_sts::config::http::HttpResponse;
         use aws_sdk_sts::error::{ConnectorError, ErrorMetadata, SdkError};
         use aws_sdk_sts::operation::assume_role_with_saml::AssumeRoleWithSAMLError;
@@ -302,6 +302,51 @@ mod tests {
             assert!(!message.contains("FAKE-SESSION-TOKEN"), "{message}");
             assert!(!message.contains("SessionToken"), "{message}");
             assert!(!message.contains("Unknown"), "{message}");
+        }
+
+        #[test]
+        fn unreadable_response_has_a_fixed_message() {
+            let error: StsError = SdkError::response_error(
+                std::io::Error::other("unexpected element"),
+                HttpResponse::new(200u16.try_into().unwrap(), "".into()),
+            );
+            assert_eq!(
+                sts_error_message(&error),
+                "the STS response could not be read"
+            );
+        }
+
+        #[test]
+        fn unhandled_service_error_hides_the_body() {
+            // A 200 that fails to parse surfaces as ServiceError(Unhandled).
+            let error: StsError = SdkError::service_error(
+                AssumeRoleWithSAMLError::unhandled(std::io::Error::other("invalid XML")),
+                HttpResponse::new(
+                    200u16.try_into().unwrap(),
+                    "<SecretAccessKey>MARKER</SecretAccessKey>".into(),
+                ),
+            );
+            assert_eq!(sts_error_message(&error), "Unknown");
+        }
+
+        #[test]
+        fn userinfo_is_removed_only_inside_the_url_authority() {
+            for (detail, expected) in [
+                ("http://u:p@h/ then a@b", "http://h/ then a@b"),
+                ("http://h then a@b", "http://h then a@b"),
+                ("http://u:p@h then a@b", "http://h then a@b"),
+                ("http://h?q then a@b", "http://h?q then a@b"),
+            ] {
+                assert_eq!(sanitize_error_detail(detail), expected, "{detail}");
+            }
+        }
+
+        #[test]
+        fn detail_is_cut_only_beyond_the_limit() {
+            let exact = "x".repeat(300);
+            assert_eq!(sanitize_error_detail(&exact), exact);
+            let over = "x".repeat(301);
+            assert_eq!(sanitize_error_detail(&over), format!("{exact}..."));
         }
 
         #[test]
