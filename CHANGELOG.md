@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - `configure` now keeps a profile's other settings when updating an existing profile.
 - Headless sign-in with a saved browser session that cannot be decrypted now fails at once and says to run `awzars login --remember-me`, instead of waiting for the timeout (#46).
+- TUI: saving an AWS profile now first copies the previous AWS config to `<config>.bak.<UTC timestamp>` (mode 0600, newest 10 kept) and aborts the save if that copy fails (#40).
 
 ### Security
 - Dependencies updated for RustSec advisories RUSTSEC-2026-0381, -0382, -0385 and -0386 (#39).

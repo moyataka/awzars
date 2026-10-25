@@ -438,3 +438,162 @@ fn duplicate_and_default_sections_survive_editing_another_profile() {
         contents.replacen("us-west-2", "ap-southeast-2", 1)
     );
 }
+
+/// Names of the `config.bak.*` files next to `path`, sorted.
+fn backups(path: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("config.bak."))
+        .collect();
+    names.sort();
+    names
+}
+
+fn edit_region(path: &Path, region: &str) {
+    let before = load_aws_integration(path.to_str()).all_profiles[0].clone();
+    let mut after = before.clone();
+    after.region = Some(region.to_string());
+    save(path, &before, after);
+}
+
+#[test]
+fn saving_backs_up_the_previous_file_privately() {
+    let (_directory, path) = config_file(BASE);
+    edit_region(&path, "eu-central-1");
+
+    let backups = backups(&path);
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let backup = path.with_file_name(&backups[0]);
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), BASE);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // `config.bak.` + `YYYYMMDDTHHMMSS.mmmZ`
+    let timestamp = &backups[0]["config.bak.".len()..];
+    assert_eq!(timestamp.len(), 20, "{timestamp}");
+    assert_eq!(&timestamp[8..9], "T");
+    assert!(timestamp.ends_with('Z'));
+}
+
+#[test]
+fn no_backup_when_the_file_is_missing_or_unchanged() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config");
+    let profile = super::parse_aws_config(BASE).remove(0);
+    let op = AwsProfileOp::Upsert {
+        before: None,
+        after: profile.clone(),
+    };
+    save_aws_config(&op, path.to_str()).unwrap();
+    assert!(backups(&path).is_empty());
+
+    save_unchanged(&path, &[profile]);
+    assert!(backups(&path).is_empty());
+}
+
+#[test]
+fn backups_are_pruned_to_the_newest_ten_and_other_files_are_kept() {
+    let (directory, path) = config_file(BASE);
+    let old: Vec<String> = (0..12)
+        .map(|n| format!("config.bak.200001{:02}T000000.000Z", n + 1))
+        .collect();
+    let unrelated = [
+        "config.bak",
+        "config.bak-20261001-tag",
+        "config.bak.20000101T000000.000Z.orig",
+        "config.bak.notatimestamp",
+        "other.bak.20000101T000000.000Z",
+    ];
+    for name in old.iter().map(String::as_str).chain(unrelated) {
+        std::fs::write(directory.path().join(name), "old").unwrap();
+    }
+
+    edit_region(&path, "eu-central-1");
+
+    let backups = backups(&path);
+    let kept: Vec<&String> = backups.iter().filter(|name| old.contains(name)).collect();
+    assert_eq!(kept, old[3..].iter().collect::<Vec<_>>());
+    let new: Vec<&String> = backups
+        .iter()
+        .filter(|name| !old.contains(name) && !unrelated.contains(&name.as_str()))
+        .collect();
+    assert_eq!(new.len(), 1, "{backups:?}");
+    assert_eq!(
+        std::fs::read_to_string(path.with_file_name(new[0])).unwrap(),
+        BASE
+    );
+    for name in unrelated {
+        assert!(directory.path().join(name).exists(), "{name} was removed");
+    }
+}
+
+#[test]
+fn back_to_back_saves_keep_every_backup() {
+    let (_directory, path) = config_file(BASE);
+    for region in ["eu-central-1", "eu-west-1", "eu-west-2", "eu-west-3"] {
+        edit_region(&path, region);
+    }
+    assert_eq!(backups(&path).len(), 4);
+}
+
+#[test]
+fn a_backup_name_clash_gets_the_next_numeric_suffix() {
+    let (directory, path) = config_file(BASE);
+    let now = chrono::DateTime::parse_from_rfc3339("2026-10-25T10:15:30.123Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let stem = "config.bak.20261025T101530.123Z";
+    std::fs::write(directory.path().join(stem), "taken").unwrap();
+
+    for expected in ["-1", "-2"] {
+        super::backup_aws_config(&path, BASE, now).unwrap();
+        let backup = directory.path().join(format!("{stem}{expected}"));
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), BASE, "{expected}");
+    }
+    assert_eq!(
+        backups(&path),
+        [stem.to_string(), format!("{stem}-1"), format!("{stem}-2")]
+    );
+    let order = |suffix: &str| super::backup_order("config", &format!("{stem}{suffix}"));
+    assert!(order("") < order("-1") && order("-1") < order("-2"));
+}
+
+#[test]
+fn a_signed_clash_suffix_is_not_a_backup_and_survives_pruning() {
+    let (directory, path) = config_file(BASE);
+    let signed = "config.bak.20000101T000000.000Z-+5";
+    std::fs::write(directory.path().join(signed), "keep").unwrap();
+    for n in 0..12 {
+        let name = format!("config.bak.200001{:02}T000000.000Z", n + 1);
+        std::fs::write(directory.path().join(name), "old").unwrap();
+    }
+
+    edit_region(&path, "eu-central-1");
+
+    assert!(directory.path().join(signed).exists());
+    assert_eq!(backups(&path).len(), 11);
+}
+
+#[test]
+fn backup_names_match_strictly_and_clashes_sort_after_their_timestamp() {
+    let order = |file_name: &str| super::backup_order("config", file_name);
+    let base = "config.bak.20261025T101530.123Z";
+    assert_eq!(order(base), Some(("20261025T101530.123Z".to_string(), 0)));
+    assert!(order(&format!("{base}-2")) < order(&format!("{base}-10")));
+    for other in [
+        "config.bak.20261025T101530.123Z-",
+        "config.bak.20261025T101530.123Z-x",
+        "config.bak.20261025T101530.123Z-+5",
+        "config.bak.20261025T101530.123Z--1",
+        "config.bak.20261025T101530.123",
+        "config.bak.20261025-101530.123Z",
+        "config.bak-20261025-tag",
+        "configx.bak.20261025T101530.123Z",
+    ] {
+        assert_eq!(order(other), None, "{other}");
+    }
+}
