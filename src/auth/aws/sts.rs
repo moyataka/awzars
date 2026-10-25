@@ -4,7 +4,13 @@ use crate::credential_process::protocol::CredentialProcessOutput;
 use crate::error::{AwzarsError, Result};
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::BehaviorVersion;
+use aws_sdk_sts::config::http::HttpResponse;
 use aws_sdk_sts::config::Region;
+use aws_sdk_sts::error::SdkError;
+use aws_sdk_sts::operation::assume_role_with_saml::AssumeRoleWithSAMLError;
+
+/// Longest error detail shown for a request that got no answer from STS.
+const ERROR_DETAIL_LIMIT: usize = 300;
 
 /// Filter an AWS error code string down to a printable, terminal-safe subset
 /// before surfacing it to the user. The SDK echoes whatever the service
@@ -24,6 +30,65 @@ fn sanitize_aws_error_code(code: &str) -> String {
     } else {
         cleaned
     }
+}
+
+/// User-facing reason for a failed `AssumeRoleWithSAML` call.
+///
+/// A service error shows only its sanitized code: the service message can
+/// name accounts or roles. A request that got no answer (DNS, TLS, proxy,
+/// timeout, invalid input) shows its cause chain, built from `Display` only,
+/// because the `Debug` form (and so `DisplayErrorContext`) includes the raw
+/// response. A response that could not be read gets a fixed text: its body
+/// may hold credentials.
+fn sts_error_message(error: &SdkError<AssumeRoleWithSAMLError, HttpResponse>) -> String {
+    use aws_sdk_sts::error::ProvideErrorMetadata;
+    match error {
+        SdkError::ServiceError(_) => sanitize_aws_error_code(error.code().unwrap_or("Unknown")),
+        SdkError::ResponseError(_) => "the STS response could not be read".to_string(),
+        SdkError::ConstructionFailure(_)
+        | SdkError::TimeoutError(_)
+        | SdkError::DispatchFailure(_) => sanitize_error_detail(&error_chain(error)),
+        _ => error.to_string(),
+    }
+}
+
+/// `error` and its sources, joined with `": "`, using `Display` only.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
+/// Make an error detail safe to print: printable ASCII only (no terminal
+/// escapes), URL userinfo (`://user:pass@`) removed, and at most
+/// `ERROR_DETAIL_LIMIT` characters.
+fn sanitize_error_detail(detail: &str) -> String {
+    let printable: String = detail.chars().filter(|c| matches!(c, ' '..='~')).collect();
+    let mut cleaned = String::with_capacity(printable.len());
+    let mut rest = printable.as_str();
+    while let Some(index) = rest.find("://") {
+        let (before, after) = rest.split_at(index + 3);
+        cleaned.push_str(before);
+        // Characters that cannot appear unencoded in userinfo end the authority.
+        let authority_end = after
+            .find(|c: char| c.is_whitespace() || "/?#\"'<>`".contains(c))
+            .unwrap_or(after.len());
+        rest = match after[..authority_end].rfind('@') {
+            Some(at) => &after[at + 1..],
+            None => after,
+        };
+    }
+    cleaned.push_str(rest);
+    if cleaned.len() > ERROR_DETAIL_LIMIT {
+        cleaned.truncate(ERROR_DETAIL_LIMIT);
+        cleaned.push_str("...");
+    }
+    cleaned
 }
 
 /// Normalize a user-supplied region: trim surrounding whitespace and treat a
@@ -80,11 +145,12 @@ pub async fn exchange_saml_for_credentials(
         .map_err(|e| {
             // Detailed AWS error metadata (request IDs, account numbers,
             // service messages) is logged at debug level only; the user-facing
-            // error message contains just the AWS error code.
-            use aws_sdk_sts::error::ProvideErrorMetadata;
-            let code = sanitize_aws_error_code(e.code().unwrap_or("Unknown"));
+            // error message is limited by `sts_error_message`.
             tracing::debug!("AssumeRoleWithSAML detailed error: {:?}", e);
-            AwzarsError::AwsSts(format!("AssumeRoleWithSAML failed: {}", code))
+            AwzarsError::AwsSts(format!(
+                "AssumeRoleWithSAML failed: {}",
+                sts_error_message(&e)
+            ))
         })?;
 
     // Extract credentials
@@ -174,5 +240,83 @@ mod tests {
         assert_eq!(sanitize_region(Some(String::new())), None);
         assert_eq!(sanitize_region(Some("   ".into())), None);
         assert_eq!(sanitize_region(None), None);
+    }
+
+    mod error_message {
+        use super::super::sts_error_message;
+        use aws_sdk_sts::config::http::HttpResponse;
+        use aws_sdk_sts::error::{ConnectorError, ErrorMetadata, SdkError};
+        use aws_sdk_sts::operation::assume_role_with_saml::AssumeRoleWithSAMLError;
+
+        type StsError = SdkError<AssumeRoleWithSAMLError, HttpResponse>;
+
+        fn dispatch_failure(detail: &str) -> StsError {
+            SdkError::dispatch_failure(ConnectorError::io(Box::new(std::io::Error::other(
+                detail.to_string(),
+            ))))
+        }
+
+        #[test]
+        fn dispatch_failure_shows_its_cause() {
+            let message = sts_error_message(&dispatch_failure(
+                "dns error: failed to lookup address information",
+            ));
+            assert!(!message.contains("Unknown"), "{message}");
+            assert!(message.contains("dispatch failure"), "{message}");
+            assert!(
+                message.contains("dns error: failed to lookup address information"),
+                "{message}"
+            );
+        }
+
+        #[test]
+        fn timeout_shows_its_cause() {
+            let error: StsError =
+                SdkError::timeout_error(std::io::Error::other("operation timed out"));
+            let message = sts_error_message(&error);
+            assert!(message.contains("operation timed out"), "{message}");
+        }
+
+        #[test]
+        fn cause_is_printable_capped_and_without_url_userinfo() {
+            let message = sts_error_message(&dispatch_failure(
+                "proxy http://someone:hunter2@proxy.example:8080/ refused \x1b[31m",
+            ));
+            assert!(!message.contains("someone"), "{message}");
+            assert!(!message.contains("hunter2"), "{message}");
+            assert!(message.contains("http://proxy.example:8080/"), "{message}");
+            assert!(!message.contains('\x1b'), "{message}");
+
+            let message = sts_error_message(&dispatch_failure(&"x".repeat(1000)));
+            assert!(message.len() <= 303, "{}", message.len());
+        }
+
+        #[test]
+        fn unreadable_response_hides_its_body() {
+            let body = "<Credentials><SessionToken>FAKE-SESSION-TOKEN</SessionToken>";
+            let error: StsError = SdkError::response_error(
+                std::io::Error::other(format!("unexpected element in {body}")),
+                HttpResponse::new(200u16.try_into().unwrap(), body.into()),
+            );
+            let message = sts_error_message(&error);
+            assert!(!message.contains("FAKE-SESSION-TOKEN"), "{message}");
+            assert!(!message.contains("SessionToken"), "{message}");
+            assert!(!message.contains("Unknown"), "{message}");
+        }
+
+        #[test]
+        fn service_error_shows_only_its_code() {
+            let error: StsError = SdkError::service_error(
+                AssumeRoleWithSAMLError::generic(
+                    ErrorMetadata::builder()
+                        .code("AccessDenied")
+                        .message("Not authorized for role example-role")
+                        .build(),
+                ),
+                HttpResponse::new(403u16.try_into().unwrap(), "".into()),
+            );
+            let message = sts_error_message(&error);
+            assert_eq!(message, "AccessDenied");
+        }
     }
 }
