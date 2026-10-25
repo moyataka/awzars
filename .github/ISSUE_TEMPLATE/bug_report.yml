@@ -14,7 +14,7 @@ body:
     attributes:
       label: awzars version
       description: Output of `awzars --version`.
-      placeholder: awzars 1.0.4
+      placeholder: awzars 1.0.5
     validations:
       required: true
   - type: dropdown
