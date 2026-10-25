@@ -552,7 +552,8 @@ These paths come from `ProjectDirs::from("com", "awzars", "awzars")`.
 `--config-dir <absolute-path>` takes precedence over `AWZARS_CONFIG_DIR`,
 which takes precedence over the platform default. `~/.awzars` is only used
 if selected explicitly through an override. The AWS configuration file is
-separate: `aws_config_path` overrides its usual `~/.aws/config` location.
+separate: `aws_config_path` overrides `AWS_CONFIG_FILE`, which overrides
+its usual `~/.aws/config` location.
 
 ```text
 <config-dir>/                     awzars settings and browser state
