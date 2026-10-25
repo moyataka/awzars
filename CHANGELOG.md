@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Security
 - Dependencies updated for RustSec advisories RUSTSEC-2026-0381, -0382, -0385 and -0386 (#39).
 
+### Fixed
+- TUI: saving an AWS profile now first copies the previous AWS config to `<config>.bak.<UTC timestamp>` (mode 0600, newest 10 kept) and aborts the save if that copy fails (#40).
+
 ## [1.0.4] - 2026-10-20
 
 ### Upgrade notes

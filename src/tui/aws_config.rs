@@ -6,7 +6,7 @@ mod document;
 mod regression_tests;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A single AWS profile entry from ~/.aws/config
 #[derive(Debug, Clone)]
@@ -177,9 +177,14 @@ pub fn load_aws_integration(path_override: Option<&str>) -> AwsIntegrationData {
 /// tenant IDs, app ID URIs, and role ARNs that aid reconnaissance, so it
 /// is kept private to the owning user.
 ///
-/// Writes are atomic: contents go to a sibling `<path>.tmp` first, then are
-/// renamed over the target. A crash mid-write leaves the previous AWS config
-/// intact rather than truncating it.
+/// Writes are atomic: contents go to a hidden temporary file in the same
+/// directory first, then are renamed over the target. A crash mid-write
+/// leaves the previous AWS config intact rather than truncating it.
+///
+/// Before a write that changes an existing file, the previous contents are
+/// copied to `<path>.bak.<YYYYMMDDTHHMMSS.mmmZ>` (UTC, mode 0o600) and only
+/// the newest [`BACKUP_COUNT`] such copies are kept. If the copy cannot be
+/// written, the save is aborted.
 pub fn save_aws_config(
     op: &AwsProfileOp,
     path_override: Option<&str>,
@@ -232,14 +237,96 @@ pub fn save_aws_config(
         }
     }
 
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+    let (contents, exists) = match std::fs::read_to_string(&path) {
+        Ok(contents) => (contents, true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
         Err(error) => return Err(error.into()),
     };
     let (output, overridden) = document::Document::parse(&contents).apply(op)?;
+    if exists && output != contents {
+        backup_aws_config(&path, &contents)?;
+    }
     crate::util::atomic_write(&path, output.as_bytes(), 0o600)?;
     Ok(overridden)
+}
+
+/// How many `<config>.bak.<timestamp>` copies `save_aws_config` keeps.
+const BACKUP_COUNT: usize = 10;
+
+/// Copy `contents` (the file as read before this save) to a new
+/// `<path>.bak.<timestamp>`, then delete all but the newest
+/// [`BACKUP_COUNT`] backups of `path`.
+fn backup_aws_config(path: &Path, contents: &str) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} has no usable file name", path.display()),
+            )
+        })?;
+    let stem = format!(
+        "{}.bak.{}",
+        name,
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
+    );
+    let mut backup = path.with_file_name(&stem);
+    let mut clash = 0;
+    while std::fs::symlink_metadata(&backup).is_ok() {
+        clash += 1;
+        backup = path.with_file_name(format!("{}-{}", stem, clash));
+    }
+    crate::util::atomic_write(&backup, contents.as_bytes(), 0o600)?;
+
+    // Pruning is best effort: the new backup is already safely written.
+    let directory = backup
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Ok(());
+    };
+    let mut backups: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            let file_name = entry.file_name().into_string().ok()?;
+            let order = backup_order(name, &file_name)?;
+            Some((order, entry.path()))
+        })
+        .collect();
+    backups.sort();
+    let excess = backups.len().saturating_sub(BACKUP_COUNT);
+    for (_, old) in backups.into_iter().take(excess) {
+        let _ = std::fs::remove_file(old);
+    }
+    Ok(())
+}
+
+/// Sort key of `file_name` if it is exactly `<name>.bak.<YYYYMMDDTHHMMSS.mmmZ>`
+/// with an optional `-<n>` clash suffix, as written by [`backup_aws_config`].
+fn backup_order(name: &str, file_name: &str) -> Option<(String, u64)> {
+    let rest = file_name.strip_prefix(name)?.strip_prefix(".bak.")?;
+    let (timestamp, clash) = match rest.split_once('-') {
+        Some((timestamp, clash)) => {
+            if clash.is_empty() || !clash.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            (timestamp, clash.parse().ok()?)
+        }
+        None => (rest, 0),
+    };
+    let bytes = timestamp.as_bytes();
+    let digits = |range: std::ops::Range<usize>| bytes[range].iter().all(u8::is_ascii_digit);
+    let valid = bytes.len() == 20
+        && digits(0..8)
+        && bytes[8] == b'T'
+        && digits(9..15)
+        && bytes[15] == b'.'
+        && digits(16..19)
+        && bytes[19] == b'Z';
+    valid.then(|| (timestamp.to_string(), clash))
 }
 
 /// Resolve the effective AWS config path: override > default.
