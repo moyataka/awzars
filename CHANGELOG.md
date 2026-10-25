@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - STS failures that never reached the service (DNS, TLS, proxy, timeout) now show their cause instead of `AssumeRoleWithSAML failed: Unknown` (#42).
 
 ### Security
+- The debug log of a failed STS call no longer includes the raw response (#66).
 - Dependencies updated for RustSec advisories RUSTSEC-2026-0381, -0382, -0385 and -0386 (#39).
 
 ## [1.0.4] - 2026-10-20

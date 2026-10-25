@@ -52,6 +52,33 @@ fn sts_error_message(error: &SdkError<AssumeRoleWithSAMLError, HttpResponse>) ->
     }
 }
 
+/// Debug-log description of a failed `AssumeRoleWithSAML` call: the error
+/// variant, sanitized error code and request ID, and the HTTP status. Never
+/// the error's `Debug` form or its sources: the raw response they carry can
+/// hold credentials (a 200 that failed to parse).
+fn describe_sdk_error(error: &SdkError<AssumeRoleWithSAMLError, HttpResponse>) -> String {
+    use aws_sdk_sts::error::ProvideErrorMetadata;
+    use aws_sdk_sts::operation::RequestId;
+    let variant = match error {
+        SdkError::ConstructionFailure(_) => "ConstructionFailure",
+        SdkError::TimeoutError(_) => "TimeoutError",
+        SdkError::DispatchFailure(_) => "DispatchFailure",
+        SdkError::ResponseError(_) => "ResponseError",
+        SdkError::ServiceError(_) => "ServiceError",
+        _ => "Other",
+    };
+    let code = error.code().map(sanitize_aws_error_code);
+    let request_id = error.request_id().map(sanitize_aws_error_code);
+    let status = error.raw_response().map(|r| r.status().as_u16());
+    format!(
+        "variant={} code={} request_id={} status={}",
+        variant,
+        code.as_deref().unwrap_or("none"),
+        request_id.as_deref().unwrap_or("none"),
+        status.map_or_else(|| "none".to_string(), |s| s.to_string())
+    )
+}
+
 /// `error` and its sources, joined with `": "`, using `Display` only.
 fn error_chain(error: &dyn std::error::Error) -> String {
     let mut text = error.to_string();
@@ -143,10 +170,13 @@ pub async fn exchange_saml_for_credentials(
         .send()
         .await
         .map_err(|e| {
-            // Detailed AWS error metadata (request IDs, account numbers,
-            // service messages) is logged at debug level only; the user-facing
-            // error message is limited by `sts_error_message`.
-            tracing::debug!("AssumeRoleWithSAML detailed error: {:?}", e);
+            // Only structured fields reach the debug log (see
+            // `describe_sdk_error`); the user-facing error message is limited
+            // by `sts_error_message`.
+            tracing::debug!(
+                "AssumeRoleWithSAML detailed error: {}",
+                describe_sdk_error(&e)
+            );
             AwzarsError::AwsSts(format!(
                 "AssumeRoleWithSAML failed: {}",
                 sts_error_message(&e)
@@ -240,6 +270,82 @@ mod tests {
         assert_eq!(sanitize_region(Some(String::new())), None);
         assert_eq!(sanitize_region(Some("   ".into())), None);
         assert_eq!(sanitize_region(None), None);
+    }
+
+    mod debug_log {
+        use super::super::describe_sdk_error;
+        use aws_sdk_sts::config::http::HttpResponse;
+        use aws_sdk_sts::error::SdkError;
+        use aws_sdk_sts::operation::assume_role_with_saml::AssumeRoleWithSAMLError;
+
+        const BODY: &str = "<SecretAccessKey>MARKER</SecretAccessKey>";
+
+        fn raw_response() -> HttpResponse {
+            let mut response = HttpResponse::new(200u16.try_into().unwrap(), BODY.into());
+            response
+                .headers_mut()
+                .insert("x-amzn-requestid", "request-1234");
+            response
+        }
+
+        type StsError = SdkError<AssumeRoleWithSAMLError, HttpResponse>;
+
+        /// The log line of an error that never got a response.
+        fn no_response_line(variant: &str) -> String {
+            format!("variant={variant} code=none request_id=none status=none")
+        }
+
+        #[test]
+        fn construction_failure_logs_its_variant() {
+            let error = StsError::construction_failure(std::io::Error::other("cause"));
+            assert_eq!(
+                describe_sdk_error(&error),
+                no_response_line("ConstructionFailure")
+            );
+        }
+
+        #[test]
+        fn timeout_logs_its_variant() {
+            let error = StsError::timeout_error(std::io::Error::other("cause"));
+            assert_eq!(describe_sdk_error(&error), no_response_line("TimeoutError"));
+        }
+
+        #[test]
+        fn dispatch_failure_logs_its_variant() {
+            let error = StsError::dispatch_failure(aws_sdk_sts::error::ConnectorError::io(
+                Box::new(std::io::Error::other("cause")),
+            ));
+            assert_eq!(
+                describe_sdk_error(&error),
+                no_response_line("DispatchFailure")
+            );
+        }
+
+        #[test]
+        fn unparsed_success_body_stays_out_of_the_service_error_log() {
+            let error: SdkError<AssumeRoleWithSAMLError, HttpResponse> = SdkError::service_error(
+                // Only the raw body holds the marker: it alone must not leak.
+                AssumeRoleWithSAMLError::unhandled(std::io::Error::other("invalid XML")),
+                raw_response(),
+            );
+            let line = describe_sdk_error(&error);
+            assert!(!line.contains("MARKER"), "{line}");
+            assert!(line.contains("variant=ServiceError"), "{line}");
+            assert!(line.contains("request_id=request-1234"), "{line}");
+            assert!(line.contains("status=200"), "{line}");
+        }
+
+        #[test]
+        fn unparsed_success_body_stays_out_of_the_response_error_log() {
+            let error: SdkError<AssumeRoleWithSAMLError, HttpResponse> = SdkError::response_error(
+                std::io::Error::other(format!("invalid XML near {BODY}")),
+                raw_response(),
+            );
+            let line = describe_sdk_error(&error);
+            assert!(!line.contains("MARKER"), "{line}");
+            assert!(line.contains("variant=ResponseError"), "{line}");
+            assert!(line.contains("status=200"), "{line}");
+        }
     }
 
     mod error_message {
