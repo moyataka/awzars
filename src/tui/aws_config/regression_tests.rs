@@ -773,7 +773,9 @@ fn aws_config_file_expands_a_leading_tilde() {
     const CHILD: &str = "AWZARS_AWS_CONFIG_FILE_TILDE_TEST";
     if std::env::var_os(CHILD).is_none() {
         for value in ["~/y", "~user/z", "relative/config"] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            // Re-runs this test binary itself, not an external program.
+            let test_binary = std::env::current_exe().unwrap(); // nosemgrep: rust.lang.security.current-exe.current-exe
+            let output = std::process::Command::new(test_binary)
                 .args([
                     "--exact",
                     "tui::aws_config::regression_tests::aws_config_file_expands_a_leading_tilde",
