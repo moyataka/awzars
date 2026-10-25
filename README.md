@@ -554,6 +554,8 @@ which takes precedence over the platform default. `~/.awzars` is only used
 if selected explicitly through an override. The AWS configuration file is
 separate: `aws_config_path` overrides `AWS_CONFIG_FILE`, which overrides
 its usual `~/.aws/config` location.
+In both, a leading `~/` is expanded to the home directory, and a relative
+path resolves against the current working directory.
 
 ```text
 <config-dir>/                     awzars settings and browser state
@@ -575,7 +577,7 @@ The directory has mode `0o700` and `config.toml` has mode `0o600` on Unix.
 Example `<config-dir>/config.toml`:
 
 ```toml
-aws_config_path = "~/.aws/config"   # optional override for AWS profile editing and orphan checks
+aws_config_path = "~/.aws/config"   # optional; overrides AWS_CONFIG_FILE for AWS profile editing and orphan checks
 
 [profiles.default.azure]
 tenant_id = "00000000-0000-0000-0000-000000000000"

@@ -338,17 +338,41 @@ fn backup_order(name: &str, file_name: &str) -> Option<(String, u64)> {
 }
 
 /// Resolve the effective AWS config path: override > `AWS_CONFIG_FILE` >
-/// default. Empty values are ignored.
+/// default. Empty values are ignored. A leading `~/` (or a bare `~`) in the
+/// override or `AWS_CONFIG_FILE` is expanded to the home directory; other
+/// paths, including relative ones, are used as given.
 pub fn resolve_aws_config_path(override_path: Option<&str>) -> Option<PathBuf> {
-    override_path
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("AWS_CONFIG_FILE")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        })
-        .or_else(aws_config_path_default)
+    if let Some(path) = override_path.filter(|s| !s.is_empty()) {
+        return expand_home(path);
+    }
+    match std::env::var_os("AWS_CONFIG_FILE").filter(|value| !value.is_empty()) {
+        Some(value) => match value.to_str() {
+            Some(path) => expand_home(path),
+            None => Some(PathBuf::from(value)),
+        },
+        None => aws_config_path_default(),
+    }
+}
+
+/// Expand a leading `~/` or a bare `~` to the home directory. Returns `None`
+/// when that is needed but the home directory cannot be resolved, for the
+/// same reason as [`aws_config_path_default`]: a literal `~` path would
+/// create a `~` directory in the cwd. `~user` is not expanded.
+fn expand_home(path: &str) -> Option<PathBuf> {
+    let rest = match path.strip_prefix('~') {
+        Some("") => "",
+        Some(rest) if rest.starts_with(['/', std::path::MAIN_SEPARATOR]) => {
+            rest.trim_start_matches(['/', std::path::MAIN_SEPARATOR])
+        }
+        _ => return Some(PathBuf::from(path)),
+    };
+    directories::BaseDirs::new().map(|bd| {
+        if rest.is_empty() {
+            bd.home_dir().to_path_buf()
+        } else {
+            bd.home_dir().join(rest)
+        }
+    })
 }
 
 /// Get the path to ~/.aws/config, or `None` if the home directory cannot be

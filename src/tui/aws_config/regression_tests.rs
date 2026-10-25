@@ -746,3 +746,56 @@ fn aws_config_file_applies_between_the_override_and_the_default() {
         );
     }
 }
+
+fn home() -> PathBuf {
+    directories::BaseDirs::new()
+        .unwrap()
+        .home_dir()
+        .to_path_buf()
+}
+
+#[test]
+fn aws_config_path_expands_a_leading_tilde_only() {
+    // Paths are only resolved here, never written.
+    let resolve = |path: &str| super::resolve_aws_config_path(Some(path)).unwrap();
+    assert_eq!(resolve("~/x"), home().join("x"));
+    assert_eq!(resolve("~/.aws/config"), home().join(".aws").join("config"));
+    assert_eq!(resolve("~"), home());
+    for unchanged in ["~user/z", "relative/config", "config", "/absolute/~/config"] {
+        assert_eq!(resolve(unchanged), PathBuf::from(unchanged), "{unchanged}");
+    }
+}
+
+#[test]
+fn aws_config_file_expands_a_leading_tilde() {
+    // Runs in a child process so setting AWS_CONFIG_FILE cannot race with
+    // other tests. Paths are only resolved, never written.
+    const CHILD: &str = "AWZARS_AWS_CONFIG_FILE_TILDE_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        for value in ["~/y", "~user/z", "relative/config"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tui::aws_config::regression_tests::aws_config_file_expands_a_leading_tilde",
+                ])
+                .env(CHILD, "1")
+                .env("AWS_CONFIG_FILE", value)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{value}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
+
+    let value = std::env::var("AWS_CONFIG_FILE").unwrap();
+    let expected = match value.strip_prefix("~/") {
+        Some(rest) => home().join(rest),
+        None => PathBuf::from(&value),
+    };
+    assert_eq!(super::resolve_aws_config_path(None), Some(expected));
+}
