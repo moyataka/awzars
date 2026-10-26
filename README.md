@@ -705,7 +705,7 @@ Or require explicit human approval on every call:
 
 ## License
 
-MIT OR Apache-2.0
+MIT. See [LICENSE](LICENSE).
 
 ## Acknowledgements
 
