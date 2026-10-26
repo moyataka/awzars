@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- The declared licence is now `MIT`, matching the `LICENSE` file. Earlier metadata also listed Apache-2.0, but no Apache-2.0 text was included (#61).
+
 ## [1.0.5] - 2026-10-26
 
 ### Upgrade notes
