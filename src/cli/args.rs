@@ -378,19 +378,38 @@ pub fn parse_lock_ttl_hours(s: &str) -> Result<u64, String> {
     Ok(v)
 }
 
-/// Azure AD app ID URI must be an https:// URI without XML-unsafe characters.
+/// Azure AD app ID URI must be an https:// URI or a `urn:` URN.
 ///
-/// Beyond the scheme + escape checks, also reject empty hosts, loopback
-/// names (`localhost`), and IP-literal hosts. Azure would refuse to issue a
-/// SAML AuthnRequest against any of those, so the user gets a clear error
-/// up front instead of an opaque 4xx from `login.microsoftonline.com`.
+/// For https:// URIs, also reject empty hosts, loopback names
+/// (`localhost`), and IP-literal hosts. Azure would refuse to issue a SAML
+/// AuthnRequest against any of those, so the user gets a clear error up
+/// front instead of an opaque 4xx from `login.microsoftonline.com`.
+///
+/// A URN must have the RFC 8141 shape `urn:<NID>:<NSS>`, as in
+/// `urn:amazon:webservices`. Whitespace, control characters and `<`, `>`,
+/// `"` (none of which may appear in a URI) are rejected for both forms.
+/// `&` and `'` are valid URI characters and are allowed: the AuthnRequest
+/// builder XML-escapes the value.
 pub fn parse_app_id_uri(s: &str) -> Result<String, String> {
+    // Checked before `Url::parse`, which silently strips tabs, newlines and
+    // leading or trailing spaces instead of failing.
+    if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("app ID URI must not contain whitespace or control characters".to_string());
+    }
+    if s.contains(['<', '>', '"']) {
+        return Err("app ID URI must not contain <, > or \"".to_string());
+    }
     let url = url::Url::parse(s).map_err(|e| format!("invalid app ID URI: {}", e))?;
-    if url.scheme() != "https" {
-        return Err(format!(
-            "app ID URI must use https:// scheme (got {})",
-            url.scheme()
-        ));
+    match url.scheme() {
+        "https" => {}
+        "urn" if is_urn(s) => return Ok(s.to_string()),
+        "urn" => return Err("app ID URI must have the form urn:<namespace>:<name>".to_string()),
+        other => {
+            return Err(format!(
+                "app ID URI must use the https:// or urn: scheme (got {})",
+                other
+            ));
+        }
     }
     let host = url
         .host()
@@ -408,10 +427,21 @@ pub fn parse_app_id_uri(s: &str) -> Result<String, String> {
             return Err("app ID URI must use a hostname, not an IP literal".to_string());
         }
     }
-    if s.contains(['<', '>', '"', '\'', '&']) {
-        return Err("app ID URI contains XML-unsafe characters".to_string());
-    }
     Ok(s.to_string())
+}
+
+/// RFC 8141 shape check: `urn:<NID>:<NSS>`, where NID is 2 to 32 ASCII
+/// letters, digits or hyphens that starts and ends with a letter or digit,
+/// and NSS is not empty.
+fn is_urn(s: &str) -> bool {
+    let Some((nid, nss)) = s.split_once(':').and_then(|(_, rest)| rest.split_once(':')) else {
+        return false;
+    };
+    (2..=32).contains(&nid.len())
+        && nid.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && nid.ends_with(|c: char| c.is_ascii_alphanumeric())
+        && nid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !nss.is_empty()
 }
 
 #[cfg(test)]
@@ -537,15 +567,75 @@ mod tests {
     #[test]
     fn test_parse_app_id_uri() {
         assert!(parse_app_id_uri("https://signin.aws.amazon.com/saml").is_ok());
-        assert!(parse_app_id_uri("urn:example:app").is_err()); // non-https rejected
         assert!(parse_app_id_uri("http://example.com/saml").is_err()); // http rejected
+        assert!(parse_app_id_uri("ftp://example.com/saml").is_err());
+        assert!(parse_app_id_uri("mailto:someone").is_err());
         assert!(parse_app_id_uri("not a uri at all").is_err());
+    }
+
+    #[test]
+    fn test_parse_app_id_uri_accepts_urn() {
+        for uri in [
+            "urn:amazon:webservices",
+            "URN:amazon:webservices",
+            "urn:example:app",
+            "urn:x-example-1:a:b/c",
+        ] {
+            assert_eq!(parse_app_id_uri(uri).as_deref(), Ok(uri), "{uri}");
+        }
+    }
+
+    #[test]
+    fn test_parse_app_id_uri_rejects_malformed_urn() {
+        let long_nid = format!("urn:{}:x", "a".repeat(33));
+        for uri in [
+            "urn:",
+            "urn:amazon",
+            "urn:amazon:",
+            "urn::webservices",
+            "urn:a:webservices",
+            "urn:-amazon:webservices",
+            "urn:amazon-:webservices",
+            "urn:ama_zon:webservices",
+            long_nid.as_str(),
+        ] {
+            assert!(parse_app_id_uri(uri).is_err(), "{uri}");
+        }
+        assert!(parse_app_id_uri(&format!("urn:{}:x", "a".repeat(32))).is_ok());
+    }
+
+    #[test]
+    fn test_parse_app_id_uri_allows_ampersand_and_apostrophe() {
+        for uri in [
+            "https://example.com/saml?a=1&b=2",
+            "https://example.com/it's",
+            "urn:example:a&b",
+        ] {
+            assert_eq!(parse_app_id_uri(uri).as_deref(), Ok(uri), "{uri}");
+        }
     }
 
     #[test]
     fn test_parse_app_id_uri_rejects_xml_unsafe() {
         assert!(parse_app_id_uri("https://example.com/<script>").is_err());
-        assert!(parse_app_id_uri("https://example.com/a&b").is_err());
+        assert!(parse_app_id_uri("https://example.com/a>b").is_err());
+        assert!(parse_app_id_uri("https://example.com/a\"b").is_err());
+        assert!(parse_app_id_uri("urn:example:<script>").is_err());
+    }
+
+    #[test]
+    fn test_parse_app_id_uri_rejects_whitespace_and_control() {
+        for uri in [
+            "https://example.com/a b",
+            "https://example.com/saml\n",
+            "https://example.com/sa\tml",
+            " https://example.com/saml",
+            "https://example.com/saml\u{7}",
+            "urn:amazon:web services",
+            "urn:amazon:webservices\r\n",
+        ] {
+            assert!(parse_app_id_uri(uri).is_err(), "{uri:?}");
+        }
     }
 
     #[test]

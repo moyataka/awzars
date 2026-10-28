@@ -158,6 +158,31 @@ mod tests {
     }
 
     #[test]
+    fn build_saml_request_round_trips_issuer_with_xml_metacharacters() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use std::io::Read;
+
+        for app_id_uri in [
+            "urn:amazon:webservices",
+            "https://example.com/saml?a=1&b='2'",
+        ] {
+            let compressed = BASE64
+                .decode(build_saml_request(app_id_uri).unwrap())
+                .unwrap();
+            let mut xml = String::new();
+            flate2::read::DeflateDecoder::new(compressed.as_slice())
+                .read_to_string(&mut xml)
+                .unwrap();
+            let doc = roxmltree::Document::parse(&xml).expect("AuthnRequest must be valid XML");
+            let issuer = doc
+                .descendants()
+                .find(|n| n.has_tag_name("Issuer"))
+                .and_then(|n| n.text());
+            assert_eq!(issuer, Some(app_id_uri));
+        }
+    }
+
+    #[test]
     fn xml_escape_handles_all_metacharacters() {
         assert_eq!(xml_escape("hello"), "hello");
         assert_eq!(xml_escape("<tag>"), "&lt;tag&gt;");
