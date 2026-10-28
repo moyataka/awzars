@@ -1,6 +1,6 @@
 name: Feature request
 description: Suggest a new option, behaviour or feature.
-labels: [enhancement]
+labels: [enhancement, needs-triage]
 body:
   - type: markdown
     attributes:
@@ -21,9 +21,16 @@ body:
     validations:
       required: true
   - type: textarea
-    id: alternatives
+    id: acceptance
     attributes:
-      label: Alternatives considered
-      description: Other approaches or workarounds you tried, and why they fall short.
+      label: Acceptance criteria
+      description: How will we know this is done? List the behaviour or output you expect to see.
     validations:
       required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (optional)
+      description: Other approaches or workarounds you tried, and why they fall short.
+    validations:
+      required: false

@@ -1,6 +1,6 @@
 name: Bug report
 description: Something in awzars doesn't work as documented or expected.
-labels: [bug]
+labels: [bug, needs-triage]
 body:
   - type: markdown
     attributes:
@@ -38,6 +38,43 @@ body:
         - Other
     validations:
       required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: The part of awzars where the bug shows up.
+      options:
+        - CLI
+        - Login / browser
+        - credential-process
+        - Password lock / unlock
+        - TUI
+        - Configuration
+        - Keychain storage
+        - Build / install
+        - Docs
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Regression?
+      description: Did this work in an earlier version?
+      options:
+        - "Yes"
+        - "No"
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: last_good_version
+    attributes:
+      label: Last version that worked (optional)
+      description: If this is a regression, the newest version where it still worked.
+      placeholder: awzars 1.0.4
+    validations:
+      required: false
   - type: textarea
     id: command
     attributes:
