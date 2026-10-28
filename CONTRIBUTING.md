@@ -47,6 +47,10 @@ Each issue and pull request gets one type label and any extra labels that apply.
    Rust 1.91.1 or newer is required with the committed `Cargo.lock`. `cargo deny` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) installed.
 4. **No secrets or personal data** in code, tests, fixtures, commit messages or the PR description. Use documentation placeholders such as `123456789012` and `example.com`.
 
+## CI runners
+
+The workflows in `.github/workflows/` use fixed runner labels (`ubuntu-26.04`, `macos-26`), not `-latest`. Dependabot does not update them. To move to a newer runner image, open a normal pull request that changes the `runs-on` labels, fixes anything the new image breaks, and adds a CHANGELOG line. The macOS release build must stay on an Apple silicon runner.
+
 ## Testing safely
 
 - Never run tests or the TUI against your real `~/.aws/config`. Point awzars at a copy with `aws_config_path` in its `config.toml`, and use a throwaway `--config-dir` (it must be an absolute path).

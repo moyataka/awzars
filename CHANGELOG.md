@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Security reports now go through GitHub private vulnerability reporting, described in the new `SECURITY.md`. The issue forms and `CONTRIBUTING.md` link to it (#86).
 - The licence allow list in `deny.toml` no longer has `OpenSSL` and `Unicode-DFS-2016`. No dependency uses them, and `cargo deny check` warned about both.
 - Bug reports now ask for the affected area and whether the bug is a regression, feature requests ask for acceptance criteria, and new forms cover documentation problems and questions. Every form adds the `needs-triage` label (#90).
+- CI and release builds run on fixed runner images (`ubuntu-26.04`, `macos-26`) instead of `ubuntu-latest` and `macos-latest`, so a new runner image no longer changes a build without a commit (#105).
 
 ### Fixed
 - Unit tests always use an in-memory keychain, so `cargo test` never creates, reads or deletes entries in the developer's OS keychain, whatever the test order (#68).
