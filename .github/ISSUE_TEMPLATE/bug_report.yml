@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. Don't report security vulnerabilities here; contact a maintainer privately.
+        Thanks for reporting a bug. Don't report security vulnerabilities here; report them through [private vulnerability reporting](https://github.com/moyataka/awzars/security/advisories/new) (see SECURITY.md).
 
         > [!IMPORTANT]
         > This issue is public. Leave out account IDs, tenant and app IDs, role ARNs, profile names, emails, hostnames, and any token or SAML text. To add a log, run the command again with `-v` and redact the same details.
@@ -75,5 +75,5 @@ body:
       options:
         - label: I removed account IDs, tenant IDs, tokens and other personal data.
           required: true
-        - label: This is not a security vulnerability (those must be reported privately to a maintainer, not in a public issue).
+        - label: This is not a security vulnerability (report those privately, see SECURITY.md).
           required: true

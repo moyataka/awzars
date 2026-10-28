@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - The declared licence is now `MIT`, matching the `LICENSE` file. Earlier metadata also listed Apache-2.0, but no Apache-2.0 text was included (#61).
+- Security reports now go through GitHub private vulnerability reporting, described in the new `SECURITY.md`. The issue forms and `CONTRIBUTING.md` link to it (#86).
 
 ## [1.0.5] - 2026-10-26
 

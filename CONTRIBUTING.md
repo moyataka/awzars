@@ -6,7 +6,7 @@ Thanks for helping. awzars handles cloud credentials, so we keep changes small a
 
 - **Found a bug?** Open an issue first, even if you plan to fix it yourself. Describe the impact and how to reproduce it.
   Leave out account IDs, tenant IDs, profile names, emails and hostnames from your environment.
-  **Exception:** if it is a security issue, don't open a public issue, discussion or pull request. Contact a maintainer privately first.
+  **Exception:** if it is a security issue, don't open a public issue, discussion or pull request. Report it privately as described in [SECURITY.md](SECURITY.md).
 - **Want a feature or a behaviour change?** Open an issue to discuss it before writing code.
 - **Adding a dependency** (a new crate or a new crate feature) needs a maintainer's agreement in the issue first.
 

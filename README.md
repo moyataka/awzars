@@ -666,6 +666,8 @@ so a persistent session exists for silent refreshes.
 Full threat model and accepted residual risks are in
 [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md).
 
+To report a vulnerability, follow [`SECURITY.md`](SECURITY.md).
+
 ### Hardening against AI agents in the same shell
 
 awzars's built-in AI-consent gate refuses credential operations when
