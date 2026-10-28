@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 - The declared licence is now `MIT`, matching the `LICENSE` file. Earlier metadata also listed Apache-2.0, but no Apache-2.0 text was included (#61).
 - Security reports now go through GitHub private vulnerability reporting, described in the new `SECURITY.md`. The issue forms and `CONTRIBUTING.md` link to it (#86).
+- The licence allow list in `deny.toml` no longer has `OpenSSL` and `Unicode-DFS-2016`. No dependency uses them, and `cargo deny check` warned about both.
 
 ### Fixed
 - Unit tests always use an in-memory keychain, so `cargo test` never creates, reads or deletes entries in the developer's OS keychain, whatever the test order (#68).
