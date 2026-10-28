@@ -40,12 +40,10 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
     "MPL-2.0",
-    "OpenSSL",
     # Data licence of the Mozilla CA bundle shipped in webpki-roots (via the
     # rustls-based HTTPS client); permissive, no copyleft.
     "CDLA-Permissive-2.0",
