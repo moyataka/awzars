@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 - The declared licence is now `MIT`, matching the `LICENSE` file. Earlier metadata also listed Apache-2.0, but no Apache-2.0 text was included (#61).
 
+### Fixed
+- Unit tests always use an in-memory keychain, so `cargo test` never creates, reads or deletes entries in the developer's OS keychain, whatever the test order (#68).
+
 ## [1.0.5] - 2026-10-26
 
 ### Upgrade notes

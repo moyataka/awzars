@@ -354,10 +354,8 @@ mod tests {
 
     #[test]
     fn short_session_credentials_are_served_from_cache() {
-        // Stale cases fall through to the keyring. Use the in-memory mock so
-        // the test does not depend on an OS keyring (headless Linux CI has no
-        // Secret Service and keyring read errors are now reported).
-        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        // Stale cases fall through to the keyring, which in tests is the
+        // in-memory test keychain.
         for (duration, buffer) in SESSION_BUFFERS {
             let lifetime = i64::from(duration);
             for (seconds_remaining, expected_fresh) in [
