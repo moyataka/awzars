@@ -29,6 +29,10 @@ Report privately anything that could:
 - bypass the profile password lock (including the scope of `unlock --allow-ai`) or the AI-agent consent gate
 - let another local user or process read or replace awzars' stored secrets
 
+The threat model and accepted residual risks are in [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md). Limits
+documented there or in the [README](README.md#security) are not vulnerabilities. For example, the
+AI-agent consent gate doesn't stop an agent that runs `unset CLAUDECODE` before it calls awzars.
+
 Ordinary bugs (crashes, wrong messages, config handling) go in public issues; see [CONTRIBUTING.md](CONTRIBUTING.md).
 If you're not sure, report privately. We'll move it to a public issue if it isn't sensitive.
 
