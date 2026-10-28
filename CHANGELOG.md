@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - Unit tests always use an in-memory keychain, so `cargo test` never creates, reads or deletes entries in the developer's OS keychain, whatever the test order (#68).
+- `configure`, `login --azure-app` and the TUI accept `urn:` app ID URIs such as `urn:amazon:webservices`, and `&` and `'` in the URI. Whitespace and control characters are now rejected (#104).
 
 ## [1.0.5] - 2026-10-26
 

@@ -527,6 +527,30 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_accepts_urn_and_escaped_ampersand_audience() {
+        // The audience is compared as an exact string, with no URL
+        // normalisation, so a urn: app ID URI matches; XML entities in the
+        // assertion are decoded before the comparison.
+        let nb = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        let na = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let issuer = format!("https://sts.windows.net/{}/", TENANT_ID);
+        for (in_xml, expected) in [
+            ("urn:amazon:webservices", "urn:amazon:webservices"),
+            ("urn:example:a&amp;b", "urn:example:a&b"),
+            (
+                "https://example.com/saml?a=1&amp;b=2",
+                "https://example.com/saml?a=1&b=2",
+            ),
+        ] {
+            let xml = build_assertion_xml(&issuer, in_xml, &nb, &na);
+            assert!(
+                SamlAssertion::parse(&encode(&xml), TENANT_ID, expected).is_ok(),
+                "{expected}"
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_rejects_wrong_audience() {
         let nb = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
         let na = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
