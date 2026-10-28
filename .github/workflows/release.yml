@@ -26,7 +26,7 @@ env:
 jobs:
   verify:
     name: verify tag
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     outputs:
       tag: ${{ steps.version.outputs.tag }}
@@ -120,9 +120,9 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-26 # Apple silicon (arm64)
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-26.04
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.verify.outputs.version }}
@@ -213,7 +213,7 @@ jobs:
   release:
     name: draft release
     needs: [verify, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: write # create the draft release and upload its assets
