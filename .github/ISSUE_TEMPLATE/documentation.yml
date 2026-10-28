@@ -1,0 +1,30 @@
+name: Documentation
+description: Something in the README, guides or help text is wrong, unclear or missing.
+labels: [documentation, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Leave out account IDs, tenant and app IDs, role ARNs, emails and hostnames.
+  - type: input
+    id: location
+    attributes:
+      label: Page or file
+      description: The file, section or command help that needs fixing.
+      placeholder: README.md, "Install" section
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing
+      description: Quote the current text if it helps.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested fix (optional)
+      description: The text you would expect to read instead.
+    validations:
+      required: false

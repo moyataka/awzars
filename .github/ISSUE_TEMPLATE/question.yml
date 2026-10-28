@@ -1,0 +1,32 @@
+name: Question
+description: Ask how to use or set up awzars.
+labels: [question, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check the [README](https://github.com/moyataka/awzars/blob/main/README.md) first; it covers installation, configuration and the common commands.
+
+        > [!IMPORTANT]
+        > This issue is public. Leave out account IDs, tenant and app IDs, role ARNs, profile names, emails, hostnames, and any token or SAML text.
+  - type: input
+    id: version
+    attributes:
+      label: awzars version (optional)
+      description: Output of `awzars --version`.
+      placeholder: awzars 1.0.5
+    validations:
+      required: false
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried (optional)
+      description: Commands you ran, docs you read, and what happened.
+    validations:
+      required: false
