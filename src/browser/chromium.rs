@@ -1025,9 +1025,8 @@ mod tests {
 
     #[test]
     fn undecryptable_cookie_store_fails_fast_only_when_headless() {
-        // In-memory keyring: the cookie keystore is created fresh, so a store
-        // written under another key cannot be decrypted.
-        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        // The test keychain starts empty: the cookie keystore is created
+        // fresh, so a store written under another key cannot be decrypted.
         let profile = "cookie-store-errors-test";
         let mut contents = vec![0u8; 64];
         contents[0] = 1; // key id 1

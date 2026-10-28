@@ -133,22 +133,26 @@ impl KeyringStorage {
     /// Create a keyring entry for a key
     pub fn entry_for_field(&self, key: &str) -> Result<Entry> {
         let username = format!("{}:{}", self.profile, key);
+        // Unit tests never build an OS keychain entry, whatever their order.
         #[cfg(test)]
-        if let Some(entry) = test_keychain::entry(&self.service_name, &username) {
-            return Ok(entry);
+        {
+            Ok(test_keychain::entry(&self.service_name, &username))
         }
-        Entry::new(&self.service_name, &username)
-            .map_err(|e| AwzarsError::Keyring(format!("Failed to create keyring entry: {}", e)))
+        #[cfg(not(test))]
+        {
+            Entry::new(&self.service_name, &username)
+                .map_err(|e| AwzarsError::Keyring(format!("Failed to create keyring entry: {}", e)))
+        }
     }
 }
 
 #[cfg(test)]
 pub(crate) mod test_keychain {
-    //! An in-memory keychain for the current test thread. Once `install`ed,
-    //! `KeyringStorage` uses it instead of the OS keychain. Unlike
-    //! `keyring::mock`, entries for the same service and user share their
-    //! secret, so a value stored through one entry reads back through
-    //! another.
+    //! An in-memory keychain for the current test thread. In test builds
+    //! `KeyringStorage` always uses it instead of the OS keychain; `install`
+    //! empties it. Unlike `keyring::mock`, entries for the same service and
+    //! user share their secret, so a value stored through one entry reads
+    //! back through another.
 
     use keyring::credential::CredentialApi;
     use keyring::Entry;
@@ -167,20 +171,21 @@ pub(crate) mod test_keychain {
         ITEMS.with(|items| *items.borrow_mut() = Some(HashMap::new()));
     }
 
-    /// The entry for `service`/`user` in this thread's store, if installed.
-    pub(super) fn entry(service: &str, user: &str) -> Option<Entry> {
+    /// The entry for `service`/`user` in this thread's store, created empty
+    /// on first use.
+    pub(super) fn entry(service: &str, user: &str) -> Entry {
         ITEMS.with(|items| {
             let mut items = items.borrow_mut();
             let slot = items
-                .as_mut()?
+                .get_or_insert_with(HashMap::new)
                 .entry(format!("{service}\0{user}"))
                 .or_default()
                 .clone();
-            Some(Entry::new_with_credential(Box::new(SharedCredential(slot))))
+            Entry::new_with_credential(Box::new(SharedCredential(slot)))
         })
     }
 
-    struct SharedCredential(Slot);
+    pub(super) struct SharedCredential(Slot);
 
     impl CredentialApi for SharedCredential {
         fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
@@ -381,6 +386,27 @@ mod tests {
             .unwrap()
             .expect("credentials for the identity they were issued for");
         assert_eq!(stored.access_key_id, "stored-key");
+    }
+
+    #[test]
+    fn unit_tests_never_build_an_os_keychain_entry() {
+        // A new thread has run no keyring code yet and nothing has called
+        // `install`, as when this test runs on its own.
+        std::thread::spawn(|| {
+            let storage = KeyringStorage::new("os_keychain_guard").unwrap();
+            for field in ["credentials", "cookie_key"] {
+                let entry = storage.entry_for_field(field).unwrap();
+                assert!(
+                    entry
+                        .get_credential()
+                        .downcast_ref::<test_keychain::SharedCredential>()
+                        .is_some(),
+                    "the {field} entry is not in the test keychain"
+                );
+            }
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
