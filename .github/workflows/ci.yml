@@ -96,3 +96,32 @@ jobs:
           tool: cargo-deny@0.20.2
       - name: cargo deny check
         run: cargo deny --locked check
+
+  pre-commit:
+    name: pre-commit
+    # Checks only what a pull request changes; dev/main pushes were checked in their PR.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The PR merge commit and its first parent, the base branch.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal -c rustfmt
+          rustup default stable
+          rustc --version
+      - name: Install pre-commit
+        run: |
+          pipx install pre-commit==4.7.0
+          pre-commit --version
+      # Stage the PR's changes on top of the base branch, so every hook sees them the way it sees
+      # a local commit. With --from-ref/--to-ref, gitleaks (it scans the staged diff) and
+      # check-added-large-files (it checks staged additions) would pass without checking anything.
+      - name: Stage the pull request's changes
+        run: git reset --soft HEAD^1
+      - name: pre-commit run
+        run: pre-commit run --show-diff-on-failure --color=always
