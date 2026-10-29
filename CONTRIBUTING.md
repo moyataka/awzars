@@ -47,6 +47,19 @@ Each issue and pull request gets one type label and any extra labels that apply.
    Rust 1.91.1 or newer is required with the committed `Cargo.lock`. `cargo deny` needs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) installed.
 4. **No secrets or personal data** in code, tests, fixtures, commit messages or the PR description. Use documentation placeholders such as `123456789012` and `example.com`.
 
+## pre-commit hooks
+
+`.pre-commit-config.yaml` checks trailing whitespace and final newlines, merge conflict markers, YAML and TOML syntax, private keys, large files, secrets (with gitleaks) and `cargo fmt`. To run these checks on every commit:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+`pre-commit run --all-files` checks the whole tree. The first run downloads the hooks. The gitleaks hook is built with Go, and pre-commit downloads Go if it isn't installed. CI runs the same hooks on the files a pull request changes.
+
+The hook versions (`rev:`) are pinned, and Dependabot does not update them. Bump them with `pre-commit autoupdate` in a normal pull request with a CHANGELOG line.
+
 ## CI runners
 
 The workflows in `.github/workflows/` use fixed runner labels (`ubuntu-26.04`, `macos-26`), not `-latest`. Dependabot does not update them. To move to a newer runner image, open a normal pull request that changes the `runs-on` labels, fixes anything the new image breaks, and adds a CHANGELOG line. The macOS release build must stay on an Apple silicon runner.
