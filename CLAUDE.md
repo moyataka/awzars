@@ -405,7 +405,7 @@ awzars login --allow-insecure-remote-chrome
 2. Navigate to Azure AD login URL (tenant_id validated as UUID)
 3. User authenticates (MFA supported)
 4. Capture the SAMLResponse from the browser's HTTPS POST to an AWS sign-in host's `/saml` endpoint (`browser/saml_capture.rs`), before the AWS console receives it
-5. **Shut down the browser** (graceful CDP close before any further processing — avoids spurious chromiumoxide WARN messages and prevents the AWS role-selection page from appearing live alongside the terminal TUI selector)
+5. **Shut down the browser** before any further processing: a graceful CDP close for a Chrome that awzars launched; with `CHROME_REMOTE_URL`, close only the page awzars opened and disconnect, leaving the remote Chrome running. This avoids spurious chromiumoxide WARN messages and prevents the AWS role-selection page from appearing live alongside the terminal TUI selector.
 6. Parse roles from assertion, validate issuer/audience/recipient/time-window
 7. Call STS AssumeRoleWithSAML (region resolved as profile `region` → AWS default chain → `us-east-1` fallback)
 8. Cache credentials in memory and store in keychain
