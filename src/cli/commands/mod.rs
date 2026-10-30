@@ -1,5 +1,6 @@
 //! CLI command implementations
 
+pub mod completions;
 pub mod configure;
 pub mod credential_process;
 pub mod delete_profile;

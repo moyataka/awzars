@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `awzars completions <shell>` prints a completion script for bash, zsh, fish or PowerShell. The README shows how to install it for each shell (#120).
+
 ### Changed
 - The declared licence is now `MIT`, matching the `LICENSE` file. Earlier metadata also listed Apache-2.0, but no Apache-2.0 text was included (#61).
 - Security reports now go through GitHub private vulnerability reporting, described in the new `SECURITY.md`. The issue forms and `CONTRIBUTING.md` link to it (#86).

@@ -469,6 +469,49 @@ under `$XDG_RUNTIME_DIR` go at logout.
 awzars list-roles         # list available AWS roles (interactive role browser)
 awzars clear-cache        # drop the profile's stored credentials; keeps the remembered browser session (prompts; --yes to skip)
 awzars delete-profile     # drop awzars profile + keyring entries + cookies (does NOT touch ~/.aws/config)
+awzars completions fish   # print a shell completion script (bash, zsh, fish, powershell)
+```
+
+### Shell completion
+
+`awzars completions <shell>` prints a completion script for subcommands and
+flags. It does not complete profile names. Install it once per shell, and
+again after upgrading awzars so new flags show up.
+
+fish:
+
+```fish
+awzars completions fish > ~/.config/fish/completions/awzars.fish
+```
+
+bash, with the bash-completion package:
+
+```bash
+mkdir -p ~/.local/share/bash-completion/completions
+awzars completions bash > ~/.local/share/bash-completion/completions/awzars
+```
+
+Without bash-completion, add `eval "$(awzars completions bash)"` to `~/.bashrc`.
+
+zsh:
+
+```zsh
+mkdir -p ~/.zfunc
+awzars completions zsh > ~/.zfunc/_awzars
+```
+
+Then make sure `~/.zshrc` has these lines, with the `fpath` line before
+`compinit`:
+
+```zsh
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit && compinit
+```
+
+PowerShell (`pwsh`): add this line to the file named by `$PROFILE`:
+
+```powershell
+awzars completions powershell | Out-String | Invoke-Expression
 ```
 
 ### Global flags

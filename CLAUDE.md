@@ -160,6 +160,7 @@ awzars tui                # Interactive config manager (profiles + AWS config)
 awzars set-password       # Set / change / --remove the password lock on a profile
 awzars unlock             # Unlock a locked profile (or grant AI consent on an unlocked one) for this terminal session
 awzars lock               # Drop this session's unlock token for a profile
+awzars completions <sh>   # Print a completion script (bash, zsh, fish, powershell; elvish also works)
 ```
 
 Global options: `-p`/`--profile` (default: "default"; commands take no positional profile, e.g. `awzars --profile work unlock`), `-v`/`-vv`/`-vvv`, `-q`/`--quiet`, `--config-dir` (env: `AWZARS_CONFIG_DIR`).
