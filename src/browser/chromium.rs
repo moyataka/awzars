@@ -699,7 +699,10 @@ fn validate_ws_url(raw: &str, allow_insecure: bool) -> Result<url::Url> {
             return Err(AwzarsError::Browser(
                 "CHROME_REMOTE_URL uses ws:// (unencrypted). \
                  This exposes credentials to network attackers. \
-                 Use wss:// or pass --allow-insecure-remote-chrome."
+                 Use wss:// or pass --allow-insecure-remote-chrome. \
+                 The flag applies only to that invocation. For AWS CLI refreshes, \
+                 add it to the credential_process command in your AWS config, or \
+                 set allow_insecure_remote_chrome = true in the awzars profile."
                     .to_string(),
             ));
         }

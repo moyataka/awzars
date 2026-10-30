@@ -517,11 +517,32 @@ and prints a warning.
 > unencrypted, so keep the connection on loopback, for example through an
 > SSH tunnel. `list-roles` has no such flag and cannot use a remote Chrome.
 
-```bash
-# On the Chrome host
-chromium --remote-debugging-port=9222
+On macOS, start Chrome with a separate profile:
 
-# On the awzars host: tunnel the port, then read the webSocketDebuggerUrl
+```bash
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir="/tmp/chrome_dev_session" \
+  --no-first-run \
+  --no-default-browser-check \
+  "about:blank"
+```
+
+This opens a visible Chrome window. Its launch command controls whether remote
+Chrome is headless; awzars's `--headless` only affects locally launched Chrome.
+Keep the profile directory to retain the remote session; `/tmp` may be cleaned.
+After restarting Chrome, fetch `/json/version` again and update
+`CHROME_REMOTE_URL` with its new `webSocketDebuggerUrl`.
+
+On a Linux Chrome host:
+
+```bash
+chromium --remote-debugging-port=9222 --user-data-dir="/tmp/chrome_dev_session"
+```
+
+On the awzars host, tunnel the port and read the `webSocketDebuggerUrl`:
+
+```bash
 ssh -N -L 9222:localhost:9222 user@chrome-host &
 curl http://localhost:9222/json/version
 export CHROME_REMOTE_URL="ws://localhost:9222/devtools/browser/<id>"
@@ -531,9 +552,11 @@ awzars login --remember-me --allow-insecure-remote-chrome
 After a successful `--remember-me` login via local or remote Chrome, session
 cookies are saved locally (encrypted). Local headed and headless logins reuse
 this store; a remembered login refreshes it, including after expired cookies
-require an interactive sign-in. Subsequent
-`awzars credential-process` calls run against **local** headless Chrome —
-no remote instance needed for refreshes.
+require an interactive sign-in. Unset `CHROME_REMOTE_URL` to make subsequent
+`awzars credential-process` refreshes use **local** headless Chrome with those
+cookies. While the variable remains set, refreshes continue using remote
+Chrome and require their own `--allow-insecure-remote-chrome` flag or the
+profile's `allow_insecure_remote_chrome = true` setting for `ws://`.
 
 See `CLAUDE.md` for full SSH-port-forward variants (Chrome on macOS, awzars on
 Linux, etc.).
@@ -595,6 +618,12 @@ Use the same override on each invocation, including the command saved in
 AWS `credential_process`, when using a custom awzars configuration directory.
 
 ## Troubleshooting
+
+**Login fails with "Secret Service: unlock prompt was dismissed".**
+The OS keyring could not be unlocked, so the AWS credentials could not be
+saved. Unlock it in the session running awzars, then retry the login. See
+[Headless / SSH keyring unlock](docs/headless-keyring.md) for Fish commands
+and guidance on the separate remote Chrome permission used by AWS refreshes.
 
 **`--headless` fails with "no persistent browser session found".**
 Headless mode reuses cookies from a prior interactive `--remember-me`

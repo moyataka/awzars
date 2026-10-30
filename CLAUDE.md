@@ -273,7 +273,7 @@ Stored in `<config-dir>/config.toml`. `<config-dir>` is `$XDG_CONFIG_HOME/awzars
 
 ## Cookie Store (Remote → Local Session Transfer)
 
-When authenticating via remote Chrome (`CHROME_REMOTE_URL`) with `--remember-me`, session cookies are extracted and saved locally to `<config-dir>/chromium/<profile>/cookies.enc` (mode 0o600, ChaCha20-Poly1305 encrypted). This enables subsequent `credential-process` calls to silently re-authenticate using **local** headless Chrome — no remote Chrome needed after the initial login.
+When authenticating via remote Chrome (`CHROME_REMOTE_URL`) with `--remember-me`, session cookies are extracted and saved locally to `<config-dir>/chromium/<profile>/cookies.enc` (mode 0o600, ChaCha20-Poly1305 encrypted). Unset `CHROME_REMOTE_URL` to let subsequent `credential-process` calls silently re-authenticate using **local** headless Chrome. While the variable remains set, browser refreshes continue using remote Chrome and require the explicit `ws://` permission.
 
 Flow:
 1. `CHROME_REMOTE_URL=ws://... awzars login --remember-me --allow-insecure-remote-chrome` → authenticate via remote Chrome, cookies saved locally
@@ -305,7 +305,7 @@ awzars login --headless --remember-me
 
 Without `--remember-me`, `--headless` is an error unless a cookie store exists (injected cookies from a prior remote Chrome session). If session cookies are expired, headless mode fails with a message to re-run interactively.
 
-When `CHROME_REMOTE_URL` is set, `--headless` controls whether the remote browser is expected to have a display (headless remote Chrome should also have been launched with `--headless`).
+When `CHROME_REMOTE_URL` is set, awzars connects to an already-running browser. Its `--headless` flag does not change that remote browser's window; Chrome's own launch command determines whether it is headless.
 
 ## Remote Chrome Setup
 
@@ -329,8 +329,22 @@ On macOS, start Chrome with remote debugging:
 ```bash
 /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
   --remote-debugging-port=9222 \
-  --remote-debugging-address=0.0.0.0 \
-  --user-data-dir="/tmp/chrome_dev_session"
+  --user-data-dir="/tmp/chrome_dev_session" \
+  --no-first-run \
+  --no-default-browser-check \
+  "about:blank"
+```
+
+This opens a visible window with a separate browser profile. The profile keeps
+its session while the directory remains intact; `/tmp` may be cleaned up. Use
+a persistent directory if the session needs to survive temporary-file cleanup.
+The `--no-first-run` and `--no-default-browser-check` flags skip Chrome's setup
+prompts, and `about:blank` opens a blank page.
+
+```text
+awzars (Linux) -- CDP via SSH tunnel --> Chrome (macOS)
+      |
+      +-- save credentials --> OS keyring (Linux)
 ```
 
 SSH port forward from Linux to Mac:
@@ -350,9 +364,18 @@ ssh -R 9222:localhost:9222 user@linux-host -N
 Then on Linux:
 
 ```bash
+# Read webSocketDebuggerUrl through the tunnel; repeat after Chrome restarts.
+curl http://localhost:9222/json/version
 export CHROME_REMOTE_URL="ws://localhost:9222/devtools/browser/xxx"
-awzars login --allow-insecure-remote-chrome
+awzars login --profile default --remember-me --allow-insecure-remote-chrome
 ```
+
+The OS keyring on Linux must also be unlocked to save credentials and cookie
+encryption keys. This is independent of the macOS browser session; see
+[Headless / SSH keyring unlock](docs/headless-keyring.md). For AWS CLI refreshes
+that continue using remote Chrome, add `--allow-insecure-remote-chrome` to the
+existing `credential_process` command, or set
+`allow_insecure_remote_chrome = true` in the awzars profile.
 
 ### Option 2: Chrome on remote Linux
 

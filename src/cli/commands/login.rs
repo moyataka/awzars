@@ -160,21 +160,28 @@ async fn exchange_for_credentials(
 /// persistent user-data-dir and cookie-store-injection-into-temp-dir to
 /// avoid SingletonLock conflicts when another Chrome holds the profile.
 async fn launch_browser_for_login(params: &LoginParams) -> Result<AzureLoginBrowser> {
-    if params.headless && params.remember_me {
+    let use_cookie_store = AzureLoginBrowser::has_cookie_store(&params.profile_name);
+    if params.headless
+        && params.remember_me
+        && !use_cookie_store
+        && std::env::var("CHROME_REMOTE_URL").is_err()
+    {
         let chromium_dir = config::chromium_data_dir(&params.profile_name)?;
         if !chromium_dir.exists() {
             tracing::warn!(
                 "Headless mode requested, but no persistent browser session found at {}",
                 chromium_dir.display()
             );
-            tracing::warn!("Run `awzars login --remember-me` first to establish a session.");
+            tracing::warn!(
+                "Run `awzars login --profile {} --remember-me` first to establish a session.",
+                params.profile_name
+            );
         }
     }
 
     // Use a cookie store from a prior remembered login if one exists,
     // even if --remember-me was passed: a persistent user-data-dir would
     // race with any other Chrome holding the profile via SingletonLock.
-    let use_cookie_store = AzureLoginBrowser::has_cookie_store(&params.profile_name);
     let remember_me_for_launch = if use_cookie_store {
         false
     } else {

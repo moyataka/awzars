@@ -4,6 +4,13 @@ Notes on why `awzars login` fails to persist credentials over SSH, and how to
 fix it. Specific to Linux boxes using the GNOME Keyring (Secret Service) as the
 `keyring` backend.
 
+When AWS CLI invokes `credential-process` and the keyring cannot be read, the
+error explicitly says that OS keyring access failed and credential expiration
+could not be checked. A reboot may have locked the keyring even when the AWS
+credentials are still valid. Unlock the OS keyring in the current login
+session, then retry the original AWS CLI command. This is the operating
+system's keyring, separate from the profile lock managed by `awzars unlock`.
+
 ## Symptom
 
 ```
@@ -27,6 +34,49 @@ It died on the *last* step: persisting to the OS keyring.
   `refresh_credentials` persists before anything is written to stdout.
 - The in-memory cache dies with the process, so **the freshly-minted (MFA'd)
   credentials are discarded** — nothing survives.
+
+```text
+awzars login -- browser sign-in --> AWS STS -- credentials --> OS keyring
+                                                               |
+                                                     locked: save fails
+                                                               |
+aws command -- credential_process --> no saved credentials --> re-auth
+```
+
+### A second error about `CHROME_REMOTE_URL`
+
+If the next AWS command fails with `CHROME_REMOTE_URL uses ws://
+(unencrypted)`, its `credential_process` invocation has independently rejected
+the connection. Passing `--allow-insecure-remote-chrome` to `awzars login`
+only permits that invocation; it does not save the flag for future commands.
+
+For a trusted remote Chrome reached over loopback or an SSH tunnel, add the
+flag to the existing command in the AWS profile used by your AWS command,
+preserving its executable path and awzars profile:
+
+```ini
+credential_process = /path/to/awzars credential-process --profile default --allow-insecure-remote-chrome
+```
+
+Alternatively, set `allow_insecure_remote_chrome = true` under
+`[profiles.default]` in the awzars `config.toml`. Unlock the OS keyring using
+option 1 below and repeat the login so its credentials can be saved.
+
+### Remote Chrome's window and session
+
+`awzars login --headless` only controls a browser launched locally. When
+`CHROME_REMOTE_URL` is set, awzars connects to the running browser; Chrome's
+own launch command determines whether it has a visible window.
+
+See [Chrome on macOS, awzars on Linux](../CLAUDE.md#option-1-chrome-on-macos-awzars-on-linux)
+for the full macOS launch command and SSH tunnel setup.
+
+A custom `--user-data-dir` gives remote Chrome a separate session. A path
+such as `/tmp/chrome_dev_session` works, but losing that directory loses
+the remote browser's saved session. A newly started Chrome also has a new
+DevTools browser URL; read `/json/version` again and update
+`CHROME_REMOTE_URL` after restarting it. These settings do not unlock the
+OS keyring on the host running awzars.
 
 ## Root cause
 

@@ -255,15 +255,31 @@ fn credentials_to_entry(
         Zeroizing::new(serde_json::to_string(&stored).map_err(|e| {
             AwzarsError::Keyring(format!("Failed to serialize credentials: {}", e))
         })?);
-    entry
-        .set_password(&json)
-        .map_err(|e| AwzarsError::Keyring(format!("Failed to store credentials: {}", e)))
+    entry.set_password(&json).map_err(|error| {
+        AwzarsError::Keyring(format!(
+            "Failed to store AWS credentials in the OS keyring. The keyring may be \
+             locked after a reboot. Unlock the OS keyring or allow access in this \
+             login session, then retry your original command.\n\
+             Details: {}",
+            error
+        ))
+    })
 }
 
 /// Deserialize the consolidated credentials JSON held in `entry`, if it was
 /// issued for `identity`.
 fn credentials_from_entry(entry: &Entry, identity: &str) -> Result<Option<Credentials>> {
-    let json = match read_secret(entry, "the stored AWS credentials")? {
+    let json = match read_secret(entry, "the stored AWS credentials").map_err(|error| {
+        AwzarsError::Keyring(format!(
+            "Cannot load stored AWS credentials: OS keyring access failed.\n\
+             Credential expiration could not be checked. The OS keyring may be \
+             locked after a reboot.\n\
+             Unlock the OS keyring in this login session, then retry your \
+             original AWS CLI command.\n\
+             Details: {}",
+            error
+        ))
+    })? {
         Some(j) => j,
         None => return Ok(None),
     };
@@ -346,8 +362,23 @@ mod tests {
     fn credentials_read_error_is_reported() {
         for err in read_errors() {
             let entry = mock_entry();
+            credentials_to_entry(&entry, &credentials(), "identity").unwrap();
             mock_of(&entry).set_error(err);
-            assert!(credentials_from_entry(&entry, "identity").is_err());
+            let error = credentials_from_entry(&entry, "identity").unwrap_err();
+            assert!(matches!(error, AwzarsError::Keyring(_)));
+            let message = error.to_string();
+            assert!(message.contains("OS keyring access failed"), "{message}");
+            assert!(
+                message.contains("Credential expiration could not be checked"),
+                "{message}"
+            );
+            assert_eq!(
+                credentials_from_entry(&entry, "identity")
+                    .unwrap()
+                    .unwrap()
+                    .access_key_id,
+                "stored-key"
+            );
         }
     }
 

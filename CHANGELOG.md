@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The repository has a `.pre-commit-config.yaml` (whitespace, merge conflict markers, YAML and TOML syntax, private keys, large files, gitleaks, `cargo fmt`), and CI runs it on the files each pull request changes (#106).
 
 ### Fixed
+- AWS CLI credential-process errors identify OS keyring access failures, explain that credential expiration could not be checked, and point to unlocking the keyring after a reboot before retrying the original command.
+- Headless login skips the local browser-session warning when remote Chrome or saved cookies provide the session. Remote Chrome documentation includes the macOS launch command and separate permissions needed by AWS CLI refreshes.
 - Unit tests always use an in-memory keychain, so `cargo test` never creates, reads or deletes entries in the developer's OS keychain, whatever the test order (#68).
 - `configure`, `login --azure-app` and the TUI accept `urn:` app ID URIs such as `urn:amazon:webservices`, and `&` and `'` in the URI. Whitespace and control characters are now rejected (#104).
 - `awzars tui` exits with the load error when `config.toml` exists but can't be loaded, instead of opening with no profiles and replacing the file on the first save (#91).

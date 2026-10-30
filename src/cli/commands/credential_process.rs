@@ -101,7 +101,7 @@ async fn refresh_credentials(
     cli_allow_insecure: bool,
 ) -> Result<CredentialProcessOutput> {
     // Credentials expired or missing — auto-login
-    tracing::info!("Credentials expired, attempting automatic re-authentication");
+    tracing::info!("No reusable AWS credentials found; attempting automatic re-authentication");
     profile.validate_app_id_uri(profile_name)?;
 
     let role_arn = profile.role_arn.clone().ok_or_else(|| {
