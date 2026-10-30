@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - CI and release builds run on fixed runner images (`ubuntu-26.04`, `macos-26`) instead of `ubuntu-latest` and `macos-latest`, so a new runner image no longer changes a build without a commit (#105).
 - The repository has a `.pre-commit-config.yaml` (whitespace, merge conflict markers, YAML and TOML syntax, private keys, large files, gitleaks, `cargo fmt`), and CI runs it on the files each pull request changes (#106).
 - `ratatui` is now 0.30 and `crossterm` 0.29. They are updated together so the build has only one `crossterm` version, the one `ratatui` draws with. `ratatui` 0.30 no longer uses `paste`, so `deny.toml` drops its ignore for RUSTSEC-2024-0436 (#81).
+- `getrandom` is now 0.4, the version `tempfile` and `uuid` already use. The cookie key and nonce come from `getrandom::fill`, its new name for the same call (#82).
 
 ### Fixed
 - AWS CLI credential-process errors identify OS keyring access failures, explain that credential expiration could not be checked, and point to unlocking the keyring after a reboot before retrying the original command.

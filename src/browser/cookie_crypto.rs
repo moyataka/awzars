@@ -64,7 +64,7 @@ fn now_unix_secs() -> i64 {
 
 fn generate_key() -> Result<[u8; 32]> {
     let mut key = [0u8; 32];
-    getrandom::getrandom(&mut key)
+    getrandom::fill(&mut key)
         .map_err(|e| AwzarsError::Storage(format!("Failed to generate cookie key: {}", e)))?;
     Ok(key)
 }
@@ -354,7 +354,7 @@ pub fn encrypt(profile: &str, json: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| AwzarsError::Storage(format!("Cipher init failed: {}", e)))?;
 
     let mut nonce_bytes = [0u8; 12];
-    getrandom::getrandom(&mut nonce_bytes)
+    getrandom::fill(&mut nonce_bytes)
         .map_err(|e| AwzarsError::Storage(format!("Nonce generation failed: {}", e)))?;
     let nonce = Nonce::from(nonce_bytes);
 
@@ -424,7 +424,7 @@ mod tests {
     fn encrypt_with_key(key_id: u8, key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
         let cipher = ChaCha20Poly1305::new_from_slice(key).unwrap();
         let mut nonce_bytes = [0u8; 12];
-        getrandom::getrandom(&mut nonce_bytes).unwrap();
+        getrandom::fill(&mut nonce_bytes).unwrap();
         let nonce = Nonce::from(nonce_bytes);
         let ciphertext = cipher.encrypt(&nonce, plaintext).unwrap();
         let mut output = Vec::with_capacity(1 + 12 + ciphertext.len());

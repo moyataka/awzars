@@ -90,7 +90,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 
 # Cookie store encryption
 chacha20poly1305 = "0.10"
-getrandom = "0.2"
+getrandom = "0.4"
 
 # URL parsing/validation
 url = "2"
