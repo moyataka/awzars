@@ -12,6 +12,19 @@ use std::path::Path;
 /// Concurrent writers never share a temporary path. Failed writes clean up
 /// their own temporary file; the previous target remains intact.
 pub fn atomic_write(path: &Path, contents: &[u8], unix_mode: u32) -> std::io::Result<()> {
+    atomic_write_if(path, contents, unix_mode, || Ok(true)).map(|_| ())
+}
+
+/// Like [`atomic_write`], but calls `replace` once the temporary file is
+/// written and synced, right before it replaces the target. If `replace`
+/// returns `false`, the temporary file is removed, the target is left as it
+/// is, and `Ok(false)` is returned.
+pub fn atomic_write_if(
+    path: &Path,
+    contents: &[u8],
+    unix_mode: u32,
+    replace: impl FnOnce() -> std::io::Result<bool>,
+) -> std::io::Result<bool> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -30,10 +43,13 @@ pub fn atomic_write(path: &Path, contents: &[u8], unix_mode: u32) -> std::io::Re
     let _ = unix_mode;
     temporary.write_all(contents)?;
     temporary.as_file().sync_all()?;
+    if !replace()? {
+        return Ok(false);
+    }
     temporary.persist(path).map_err(|error| error.error)?;
     #[cfg(unix)]
     std::fs::File::open(parent)?.sync_all()?;
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -68,6 +84,17 @@ mod tests {
         let target = directory.path().join("directory");
         std::fs::create_dir(&target).unwrap();
         assert!(atomic_write(&target, b"contents", 0o600).is_err());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_declined_replace_keeps_the_target_and_removes_the_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("target");
+        std::fs::write(&path, b"old").unwrap();
+
+        assert!(!atomic_write_if(&path, b"new", 0o600, || Ok(false)).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 

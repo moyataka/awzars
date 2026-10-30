@@ -87,6 +87,8 @@ pub enum SaveError {
     Missing(String),
     /// The new profile name is already used in the file.
     Exists(String),
+    /// The file changed during every save attempt.
+    Changed,
 }
 
 impl std::fmt::Display for SaveError {
@@ -99,6 +101,10 @@ impl std::fmt::Display for SaveError {
                 name
             ),
             Self::Exists(name) => write!(f, "AWS profile '{}' already exists", name),
+            Self::Changed => write!(
+                f,
+                "AWS config file kept changing during the save; nothing was written"
+            ),
         }
     }
 }
@@ -186,9 +192,28 @@ pub fn load_aws_integration(path_override: Option<&str>) -> AwsIntegrationData {
 /// copied to `<path>.bak.<YYYYMMDDTHHMMSS.mmmZ>` (UTC, mode 0o600) and only
 /// the newest [`BACKUP_COUNT`] such copies are kept. If the copy cannot be
 /// written, the save is aborted.
+///
+/// Right before the rename the file is read again. If it changed since it was
+/// read for this save, the change is applied again to the new contents, up to
+/// [`SAVE_ATTEMPTS`] times in all; after that the save fails with
+/// [`SaveError::Changed`] and the file is left as it is.
 pub fn save_aws_config(
     op: &AwsProfileOp,
     path_override: Option<&str>,
+) -> Result<Vec<String>, SaveError> {
+    save_aws_config_with(op, path_override, &mut || {})
+}
+
+/// How many times [`save_aws_config`] applies a change before giving up on a
+/// file that keeps changing.
+const SAVE_ATTEMPTS: usize = 3;
+
+/// [`save_aws_config`], calling `before_check` right before each final
+/// re-read of the file. Tests use it to change the file at that point.
+fn save_aws_config_with(
+    op: &AwsProfileOp,
+    path_override: Option<&str>,
+    before_check: &mut dyn FnMut(),
 ) -> Result<Vec<String>, SaveError> {
     let path = resolve_aws_config_path(path_override).ok_or_else(|| {
         std::io::Error::new(
@@ -245,17 +270,34 @@ pub fn save_aws_config(
         }
     }
 
-    let (contents, exists) = match std::fs::read_to_string(&path) {
-        Ok(contents) => (contents, true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
-        Err(error) => return Err(error.into()),
-    };
-    let (output, overridden) = document::Document::parse(&contents).apply(op)?;
-    if exists && output != contents {
-        backup_aws_config(&path, &contents, chrono::Utc::now())?;
+    for _ in 0..SAVE_ATTEMPTS {
+        let current = read_aws_config(&path)?;
+        let contents = current.as_deref().unwrap_or_default();
+        let (output, overridden) = document::Document::parse(contents).apply(op)?;
+        if current.is_some() && output != contents {
+            backup_aws_config(&path, contents, chrono::Utc::now())?;
+        }
+        // Replace the file only if it still holds what the change was
+        // applied to. Comparing contents, not the modification time, also
+        // catches an edit within the timestamp resolution.
+        let replaced = crate::util::atomic_write_if(&path, output.as_bytes(), 0o600, || {
+            before_check();
+            Ok(read_aws_config(&path)? == current)
+        })?;
+        if replaced {
+            return Ok(overridden);
+        }
     }
-    crate::util::atomic_write(&path, output.as_bytes(), 0o600)?;
-    Ok(overridden)
+    Err(SaveError::Changed)
+}
+
+/// The AWS config file's contents, or `None` if it does not exist.
+fn read_aws_config(path: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// How many `<config>.bak.<timestamp>` copies `save_aws_config` keeps.

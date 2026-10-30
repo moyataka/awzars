@@ -1,4 +1,7 @@
-use super::{load_aws_integration, save_aws_config, AwsProfileEntry, AwsProfileOp, SaveError};
+use super::{
+    load_aws_integration, save_aws_config, save_aws_config_with, AwsProfileEntry, AwsProfileOp,
+    SaveError, SAVE_ATTEMPTS,
+};
 use crate::tui::form::{AwsProfileForm, AWS_IDX_REGION};
 use std::path::{Path, PathBuf};
 
@@ -800,4 +803,174 @@ fn aws_config_file_expands_a_leading_tilde() {
         None => PathBuf::from(&value),
     };
     assert_eq!(super::resolve_aws_config_path(None), Some(expected));
+}
+
+/// Save `op`, writing `outside` to the file right before the first final
+/// re-read, as another tool would between the save's read and its rename.
+/// Returns the result and how many times the file was checked.
+fn save_racing(
+    path: &Path,
+    op: &AwsProfileOp,
+    outside: &str,
+) -> (Result<Vec<String>, SaveError>, usize) {
+    let mut checks = 0;
+    let result = save_aws_config_with(op, path.to_str(), &mut || {
+        if checks == 0 {
+            std::fs::write(path, outside).unwrap();
+        }
+        checks += 1;
+    });
+    (result, checks)
+}
+
+#[test]
+fn an_outside_edit_during_the_save_is_kept_and_the_change_applied_again() {
+    let (_directory, path) = config_file(BASE);
+    let before = load_aws_integration(path.to_str()).all_profiles[0].clone();
+    let mut after = before.clone();
+    after.region = Some("eu-central-1".to_string());
+    let op = AwsProfileOp::Upsert {
+        before: Some(before),
+        after,
+    };
+    let outside = edit_outside(BASE);
+
+    let (result, checks) = save_racing(&path, &op, &outside);
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        outside.replacen("region = us-east-1", "region = eu-central-1", 1)
+    );
+    assert!(result.unwrap().is_empty());
+    assert_eq!(checks, 2);
+}
+
+#[test]
+fn every_operation_is_applied_again_to_an_outside_edit_during_the_save() {
+    let outside = edit_outside(BASE);
+    let before = AwsProfileEntry {
+        name: "target".to_string(),
+        region: Some("us-east-1".to_string()),
+        credential_process: None,
+        uses_awzars: false,
+        awzars_profile: None,
+        source_profile: None,
+        role_arn: None,
+        role_session_name: None,
+        extra: [("output".to_string(), "json".to_string())].into(),
+    };
+    let mut renamed = before.clone();
+    renamed.name = "renamed".to_string();
+    let mut added = before.clone();
+    added.name = "added".to_string();
+    let cases = [
+        (
+            AwsProfileOp::Upsert {
+                before: Some(before.clone()),
+                after: renamed,
+            },
+            outside.replacen("[profile target]", "[profile renamed]", 1),
+        ),
+        (
+            AwsProfileOp::Delete {
+                name: "target".to_string(),
+            },
+            outside[outside.find("[profile other]").unwrap()..].to_string(),
+        ),
+        (
+            AwsProfileOp::Upsert {
+                before: None,
+                after: added,
+            },
+            format!("{outside}\n[profile added]\noutput = json\nregion = us-east-1\n"),
+        ),
+    ];
+
+    for (op, expected) in cases {
+        let (_directory, path) = config_file(BASE);
+        let (result, checks) = save_racing(&path, &op, &outside);
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected, "{op:?}");
+        assert!(result.unwrap().is_empty(), "{op:?}");
+        assert_eq!(checks, 2, "{op:?}");
+    }
+}
+
+#[test]
+fn a_profile_removed_or_added_outside_during_the_save_aborts_without_writing() {
+    let (_directory, path) = config_file(BASE);
+    let before = load_aws_integration(path.to_str()).all_profiles[0].clone();
+    let removed = "[profile other]\nregion = us-west-2\n";
+    let delete = AwsProfileOp::Delete {
+        name: "target".to_string(),
+    };
+
+    let (result, _) = save_racing(&path, &delete, removed);
+    assert!(matches!(result, Err(SaveError::Missing(name)) if name == "target"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), removed);
+
+    let (_directory, path) = config_file(BASE);
+    let added_outside = edit_outside(BASE);
+    let mut renamed = before.clone();
+    renamed.name = "outside".to_string();
+    let rename = AwsProfileOp::Upsert {
+        before: Some(before),
+        after: renamed,
+    };
+
+    let (result, _) = save_racing(&path, &rename, &added_outside);
+    assert!(matches!(result, Err(SaveError::Exists(name)) if name == "outside"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), added_outside);
+}
+
+#[test]
+fn a_file_that_keeps_changing_during_the_save_is_left_alone() {
+    let (_directory, path) = config_file(BASE);
+    let op = AwsProfileOp::Delete {
+        name: "target".to_string(),
+    };
+    let mut checks = 0;
+
+    let result = save_aws_config_with(&op, path.to_str(), &mut || {
+        checks += 1;
+        std::fs::write(&path, format!("{BASE}# outside edit {checks}\n")).unwrap();
+    });
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        format!("{BASE}# outside edit {SAVE_ATTEMPTS}\n")
+    );
+    assert!(matches!(result, Err(SaveError::Changed)));
+    assert_eq!(checks, SAVE_ATTEMPTS);
+}
+
+#[test]
+fn a_file_created_outside_during_the_save_is_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config");
+    let op = AwsProfileOp::Upsert {
+        before: None,
+        after: AwsProfileEntry {
+            name: "added".to_string(),
+            region: Some("us-east-1".to_string()),
+            credential_process: None,
+            uses_awzars: false,
+            awzars_profile: None,
+            source_profile: None,
+            role_arn: None,
+            role_session_name: None,
+            extra: Default::default(),
+        },
+    };
+
+    let (result, checks) = save_racing(&path, &op, BASE);
+
+    let names: Vec<String> = load_aws_integration(path.to_str())
+        .all_profiles
+        .into_iter()
+        .map(|profile| profile.name)
+        .collect();
+    assert_eq!(names, ["target", "other", "added"]);
+    assert!(result.unwrap().is_empty());
+    assert_eq!(checks, 2);
 }
