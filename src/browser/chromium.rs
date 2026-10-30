@@ -161,13 +161,14 @@ fn decode_cookie_store(
 /// Decide whether a cookie-injection failure stops the sign-in.
 ///
 /// Headless sign-in cannot succeed without the cookies, so it fails now
-/// instead of waiting for the timeout. A visible browser carries on.
+/// instead of waiting for the timeout. A visible browser carries on and
+/// warns, so a problem such as a leftover plaintext `cookies.json` is seen.
 fn cookie_injection_outcome(injected: Result<bool>, headless: bool) -> Result<()> {
     match injected {
         Ok(_) => Ok(()),
         Err(e) if headless => Err(e),
         Err(e) => {
-            tracing::debug!("Cookie injection skipped: {}", e);
+            tracing::warn!("Saved browser session not used: {}", e);
             Ok(())
         }
     }
@@ -1088,6 +1089,50 @@ mod tests {
             other => panic!("expected the injection error, got {:?}", other),
         }
         assert!(cookie_injection_outcome(failure(), false).is_ok());
+    }
+
+    #[test]
+    fn headed_sign_in_warns_about_leftover_plaintext_cookies() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+        impl Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("cookies.json");
+        std::fs::write(&legacy, b"[]").unwrap();
+        let refused = refuse_if_legacy_cookies_present_at(&legacy).map(|_| true);
+
+        // Only warnings and errors are captured, as with the default filter.
+        let captured = Captured(Arc::new(Mutex::new(Vec::new())));
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let outcome = tracing::subscriber::with_default(subscriber, || {
+            cookie_injection_outcome(refused, false)
+        });
+
+        assert!(outcome.is_ok(), "a visible browser still carries on");
+        let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("WARN"), "logged: {:?}", logged);
+        assert!(
+            logged.contains("Legacy plaintext cookie file detected"),
+            "logged: {:?}",
+            logged
+        );
     }
 
     #[test]
