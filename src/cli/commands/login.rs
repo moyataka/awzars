@@ -513,6 +513,28 @@ fn persistence_after_pick(
     }
 }
 
+/// Whether a person can answer the remember-me prompt: stdin and stderr are
+/// terminals (the prompt draws on stderr) and this is not a
+/// `--credential-process` call.
+fn remember_me_can_prompt(credential_process: bool, stdin_tty: bool, stderr_tty: bool) -> bool {
+    !credential_process && stdin_tty && stderr_tty
+}
+
+/// `remember_me` for a login: `--remember-me`, then the profile's stored
+/// value. `None` means ask the user. When nobody can be asked, the session is
+/// not remembered and nothing is saved.
+fn resolve_remember_me(flag: bool, stored: Option<bool>, can_prompt: bool) -> Option<bool> {
+    if flag {
+        Some(true)
+    } else if stored.is_some() {
+        stored
+    } else if can_prompt {
+        None
+    } else {
+        Some(false)
+    }
+}
+
 /// Write fresh credentials to both the in-process cache and the OS
 /// keyring so subsequent calls (and subsequent processes) skip the
 /// browser flow. `identity` is the fingerprint of the identity the
@@ -577,11 +599,18 @@ pub async fn execute(args: &Args) -> Result<()> {
         .as_ref()
         .unwrap_or(&profile.azure.app_id_uri);
 
-    // Resolve remember_me: CLI flag > profile config > prompt. The prompt runs
-    // before the refresh lock is taken so it never blocks other refreshes.
-    let remember_me = if login_args.remember_me {
-        true
-    } else if let Some(rm) = profile.remember_me {
+    // Resolve remember_me: CLI flag > profile config > prompt (only when a
+    // person can answer it). The prompt runs before the refresh lock is
+    // taken so it never blocks other refreshes.
+    let remember_me = if let Some(rm) = resolve_remember_me(
+        login_args.remember_me,
+        profile.remember_me,
+        remember_me_can_prompt(
+            login_args.credential_process,
+            std::io::stdin().is_terminal(),
+            std::io::stderr().is_terminal(),
+        ),
+    ) {
         rm
     } else {
         let answer = Confirm::new()
@@ -1305,6 +1334,95 @@ mod tests {
             message.contains("awzars configure --profile work"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn remember_me_prompt_needs_both_terminals_and_no_credential_process() {
+        assert!(remember_me_can_prompt(false, true, true));
+        assert!(!remember_me_can_prompt(true, true, true));
+        assert!(!remember_me_can_prompt(false, false, true));
+        assert!(!remember_me_can_prompt(false, true, false));
+    }
+
+    #[test]
+    fn remember_me_is_asked_only_when_unset_and_someone_can_answer() {
+        for can_prompt in [false, true] {
+            assert_eq!(resolve_remember_me(true, None, can_prompt), Some(true));
+            assert_eq!(
+                resolve_remember_me(true, Some(false), can_prompt),
+                Some(true)
+            );
+            for stored in [false, true] {
+                assert_eq!(
+                    resolve_remember_me(false, Some(stored), can_prompt),
+                    Some(stored)
+                );
+            }
+        }
+        assert_eq!(resolve_remember_me(false, None, true), None);
+        assert_eq!(resolve_remember_me(false, None, false), Some(false));
+    }
+
+    #[tokio::test]
+    async fn login_without_a_terminal_skips_remember_me_prompt() {
+        use clap::Parser;
+        if let Ok(directory) = std::env::var("AWZARS_LOGIN_REMEMBER_ME_DIRECTORY") {
+            config::set_config_dir_override(&directory).unwrap();
+            let mut profile = crate::config::Profile::new(crate::config::AzureConfig::new(
+                "11111111-2222-3333-4444-aaaaaaaaaaaa",
+                "https://signin.aws.amazon.com/saml",
+            ));
+            profile.lock_ai_markers = Some(vec![]);
+            let mut config = Config::default();
+            config.set_profile("default", profile);
+            config.save().unwrap();
+            let mut arguments = vec!["awzars", "login"];
+            if std::env::var("AWZARS_LOGIN_REMEMBER_ME_CREDENTIAL_PROCESS").is_ok() {
+                arguments.push("--credential-process");
+            }
+            let error = execute(&Args::try_parse_from(arguments).unwrap())
+                .await
+                .unwrap_err();
+            // Without a prompt, sign-in goes on to the browser, which
+            // refuses the `ws://` remote URL.
+            assert!(
+                matches!(error, AwzarsError::Browser(_)),
+                "unexpected error: {error:?}"
+            );
+            let saved = Config::load().unwrap();
+            assert_eq!(saved.get_profile("default").unwrap().remember_me, None);
+            return;
+        }
+        // The child runs `execute` with no terminal: stdin is closed and
+        // stdout and stderr are captured. A `ws://` remote URL without
+        // `--allow-insecure-remote-chrome` is refused before connecting, so
+        // no case can open Chrome.
+        for credential_process in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "cli::commands::login::tests::login_without_a_terminal_skips_remember_me_prompt",
+                    "--nocapture",
+                ])
+                .env("AWZARS_LOGIN_REMEMBER_ME_DIRECTORY", directory.path())
+                .env("CHROME_REMOTE_URL", "ws://127.0.0.1:9/devtools/browser/test")
+                .env_remove("AWZARS_AZURE_TENANT_ID")
+                .env_remove("AWZARS_AZURE_APP_ID_URI");
+            if credential_process {
+                command.env("AWZARS_LOGIN_REMEMBER_ME_CREDENTIAL_PROCESS", "1");
+            } else {
+                command.env_remove("AWZARS_LOGIN_REMEMBER_ME_CREDENTIAL_PROCESS");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "credential_process: {credential_process}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
