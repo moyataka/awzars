@@ -212,6 +212,13 @@ pub enum Command {
 
     /// Lock the profile in this terminal session (drops the unlock token).
     Lock,
+
+    /// Print a shell completion script to stdout
+    Completions {
+        /// Shell to generate the script for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]

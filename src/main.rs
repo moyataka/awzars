@@ -98,6 +98,7 @@ async fn run(args: Args) -> awzars::error::Result<()> {
             args.quiet,
         ),
         Command::Lock => awzars::cli::commands::lock::run(&args.profile, args.quiet),
+        Command::Completions { shell } => awzars::cli::commands::completions::execute(*shell),
     }
 }
 
