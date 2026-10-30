@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `configure` keeps a profile's tenant ID, app ID URI, session duration and "stay logged in" setting when the matching flag isn't passed, so `--non-interactive` no longer blanks them or clears stored credentials, and pressing Enter at the session duration prompt keeps the current value. A missing `--role-arn` still clears the role (#54, #92).
 - Reading a saved browser session no longer creates a cookie key in the OS keychain when none exists; the session is reported as unreadable instead, as before (#50).
 - A TUI save reads the AWS config file again right before replacing it. If another program changed it after the save read it, the TUI's change is applied again to the new contents (up to three tries) instead of overwriting the outside edit. If the file keeps changing, nothing is written (#53).
+- A sign-in with a visible browser now warns when the saved browser session can't be used, for example because a plaintext `cookies.json` from an older version is still on disk, and shows how to remove it. Before, this was logged only with `-vv` (#58).
 
 ## [1.0.5] - 2026-10-26
 
