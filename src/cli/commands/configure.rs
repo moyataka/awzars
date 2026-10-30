@@ -31,13 +31,7 @@ pub async fn execute(args: &Args) -> Result<()> {
         if let Some(ref cfg) = config_args {
             if cfg.non_interactive {
                 // Use provided values
-                (
-                    cfg.azure_tenant.clone().unwrap_or_default(),
-                    cfg.azure_app.clone().unwrap_or_default(),
-                    cfg.role_arn.clone(),
-                    cfg.session_duration,
-                    None,
-                )
+                non_interactive_values(config.get_profile(&args.profile).ok(), cfg)
             } else {
                 // Interactive mode with defaults from args
                 interactive_configure(&config, &args.profile, Some(cfg))?
@@ -117,6 +111,29 @@ fn build_profile(
 /// (tenant_id, app_id_uri, role_arn, session_duration, remember_me)
 type InteractiveConfigureResult = (String, String, Option<String>, i32, Option<bool>);
 
+/// Values for `--non-interactive`. A flag that is not given keeps the existing
+/// profile's value, except `--role-arn`: without it the role is cleared.
+fn non_interactive_values(
+    existing: Option<&Profile>,
+    args: &ConfigureArgs,
+) -> InteractiveConfigureResult {
+    (
+        args.azure_tenant
+            .clone()
+            .or_else(|| existing.map(|p| p.azure.tenant_id.clone()))
+            .unwrap_or_default(),
+        args.azure_app
+            .clone()
+            .or_else(|| existing.map(|p| p.azure.app_id_uri.clone()))
+            .unwrap_or_default(),
+        args.role_arn.clone(),
+        args.session_duration
+            .or_else(|| existing.map(|p| p.azure.session_duration))
+            .unwrap_or(3600),
+        existing.and_then(|p| p.remember_me),
+    )
+}
+
 fn interactive_configure(
     config: &Config,
     profile_name: &str,
@@ -140,7 +157,7 @@ fn interactive_configure(
         .unwrap_or_default();
 
     let default_duration = args
-        .map(|a| a.session_duration)
+        .and_then(|a| a.session_duration)
         .or_else(|| existing.map(|p| p.azure.session_duration))
         .unwrap_or(3600);
 
@@ -277,6 +294,125 @@ mod tests {
         assert!(crate::config::cleanup::credential_identity_changed(
             &existing, &updated
         ));
+    }
+
+    fn configure_args(command: &[&str]) -> ConfigureArgs {
+        use clap::Parser;
+        let args = Args::try_parse_from(command).unwrap();
+        ConfigureArgs::from_command(&args.command).unwrap()
+    }
+
+    fn stored_profile() -> Profile {
+        Profile {
+            azure: AzureConfig {
+                tenant_id: "11111111-2222-3333-4444-aaaaaaaaaaaa".into(),
+                app_id_uri: "https://stored.example/app".into(),
+                default_role_arn: Some("arn:aws:iam::123456789012:role/Stored".into()),
+                session_duration: 43200,
+            },
+            role_arn: Some("arn:aws:iam::123456789012:role/Stored".into()),
+            remember_me: Some(true),
+            ..Profile::default()
+        }
+    }
+
+    #[test]
+    fn configure_session_duration_is_unset_without_the_flag() {
+        let args = configure_args(&["awzars", "configure"]);
+        assert_eq!(args.session_duration, None);
+
+        let args = configure_args(&["awzars", "configure", "--session-duration", "7200"]);
+        assert_eq!(args.session_duration, Some(7200));
+    }
+
+    #[test]
+    fn non_interactive_keeps_stored_values_for_absent_flags() {
+        let existing = stored_profile();
+        let args = ConfigureArgs {
+            azure_tenant: None,
+            azure_app: None,
+            role_arn: None,
+            session_duration: None,
+            non_interactive: true,
+        };
+
+        let (tenant, app, role, duration, remember) =
+            non_interactive_values(Some(&existing), &args);
+
+        assert_eq!(tenant, "11111111-2222-3333-4444-aaaaaaaaaaaa");
+        assert_eq!(app, "https://stored.example/app");
+        assert_eq!(duration, 43200);
+        assert_eq!(remember, Some(true));
+        // An absent --role-arn still clears the role.
+        assert_eq!(role, None);
+    }
+
+    #[test]
+    fn non_interactive_rerun_with_same_role_keeps_credential_identity() {
+        let existing = stored_profile();
+        let args = ConfigureArgs {
+            azure_tenant: None,
+            azure_app: None,
+            role_arn: existing.role_arn.clone(),
+            session_duration: None,
+            non_interactive: true,
+        };
+
+        let (tenant_id, app_id_uri, role_arn, session_duration, remember_me) =
+            non_interactive_values(Some(&existing), &args);
+        let azure = AzureConfig {
+            tenant_id,
+            app_id_uri,
+            default_role_arn: role_arn.clone(),
+            session_duration,
+        };
+        let updated = build_profile(Some(&existing), azure, role_arn, remember_me);
+
+        assert_eq!(updated.azure.session_duration, 43200);
+        assert_eq!(updated.remember_me, Some(true));
+        assert!(!crate::config::cleanup::credential_identity_changed(
+            &existing, &updated
+        ));
+    }
+
+    #[test]
+    fn non_interactive_flags_override_stored_values() {
+        let existing = stored_profile();
+        let args = ConfigureArgs {
+            azure_tenant: Some("11111111-2222-3333-4444-bbbbbbbbbbbb".into()),
+            azure_app: Some("https://new.example/app".into()),
+            role_arn: Some("arn:aws:iam::123456789012:role/New".into()),
+            session_duration: Some(900),
+            non_interactive: true,
+        };
+
+        let (tenant, app, role, duration, remember) =
+            non_interactive_values(Some(&existing), &args);
+
+        assert_eq!(tenant, "11111111-2222-3333-4444-bbbbbbbbbbbb");
+        assert_eq!(app, "https://new.example/app");
+        assert_eq!(role.as_deref(), Some("arn:aws:iam::123456789012:role/New"));
+        assert_eq!(duration, 900);
+        assert_eq!(remember, Some(true));
+    }
+
+    #[test]
+    fn non_interactive_new_profile_uses_defaults() {
+        let args = ConfigureArgs {
+            azure_tenant: None,
+            azure_app: None,
+            role_arn: None,
+            session_duration: None,
+            non_interactive: true,
+        };
+
+        let (tenant, app, role, duration, remember) = non_interactive_values(None, &args);
+
+        assert_eq!(tenant, "");
+        assert_eq!(app, "");
+        assert_eq!(role, None);
+        assert_eq!(duration, 3600);
+        assert_eq!(remember, None);
     }
 
     #[test]

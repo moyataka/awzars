@@ -111,9 +111,10 @@ pub enum Command {
         #[arg(long, value_parser = parse_role_arn)]
         role_arn: Option<String>,
 
-        /// Default session duration (900..=43200)
-        #[arg(long, default_value = "3600", value_parser = parse_session_duration)]
-        session_duration: i32,
+        /// Default session duration (900..=43200). Without it, the profile's current
+        /// value is kept, or 3600 is used for a new profile
+        #[arg(long, value_parser = parse_session_duration)]
+        session_duration: Option<i32>,
 
         /// Non-interactive mode (use provided values)
         #[arg(long)]
@@ -287,7 +288,7 @@ pub struct ConfigureArgs {
     pub azure_tenant: Option<String>,
     pub azure_app: Option<String>,
     pub role_arn: Option<String>,
-    pub session_duration: i32,
+    pub session_duration: Option<i32>,
     pub non_interactive: bool,
 }
 
