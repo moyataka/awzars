@@ -2,12 +2,16 @@
 
 use crate::credential_process::protocol::CredentialProcessOutput;
 use crate::error::{AwzarsError, Result};
+use aws_config::environment::region::EnvironmentVariableRegionProvider;
+use aws_config::imds::region::ImdsRegionProvider;
 use aws_config::meta::region::RegionProviderChain;
+use aws_config::profile::region::ProfileFileRegionProvider;
 use aws_config::BehaviorVersion;
 use aws_sdk_sts::config::http::HttpResponse;
 use aws_sdk_sts::config::Region;
 use aws_sdk_sts::error::SdkError;
 use aws_sdk_sts::operation::assume_role_with_saml::AssumeRoleWithSAMLError;
+use std::time::Duration;
 
 /// Longest error detail shown for a request that got no answer from STS.
 const ERROR_DETAIL_LIMIT: usize = 300;
@@ -128,17 +132,36 @@ fn sanitize_region(region: Option<String>) -> Option<Region> {
         .map(Region::new)
 }
 
+/// Longest wait for the instance metadata service (IMDS) when the region
+/// comes from it. On EC2 it answers in milliseconds; elsewhere the SDK's
+/// 1 s timeouts only delay the `us-east-1` fallback.
+const IMDS_REGION_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// IMDS client for the region lookup, bounded by `IMDS_REGION_TIMEOUT`.
+fn imds_region_client() -> aws_config::imds::client::Builder {
+    aws_config::imds::Client::builder()
+        .connect_timeout(IMDS_REGION_TIMEOUT)
+        .read_timeout(IMDS_REGION_TIMEOUT)
+        .operation_timeout(IMDS_REGION_TIMEOUT)
+}
+
 /// Region provider for the STS endpoint, in precedence order:
 ///
 /// 1. the awzars profile's `region` (so a region set only in
 ///    the configured `config.toml` is honoured — it was previously ignored),
 /// 2. the standard AWS default chain (`AWS_REGION` / `AWS_DEFAULT_REGION`,
-///    `~/.aws/config`, IMDS),
+///    `~/.aws/config`, IMDS), built here so that the IMDS lookup is bounded
+///    by `IMDS_REGION_TIMEOUT`,
 /// 3. a `us-east-1` fallback so `AssumeRoleWithSAML` never fails purely for
 ///    lack of a configured region anywhere.
 fn build_region_provider(profile_region: Option<String>) -> RegionProviderChain {
+    let imds = ImdsRegionProvider::builder()
+        .imds_client(imds_region_client().build())
+        .build();
     RegionProviderChain::first_try(sanitize_region(profile_region))
-        .or_default_provider()
+        .or_else(EnvironmentVariableRegionProvider::new())
+        .or_else(ProfileFileRegionProvider::new())
+        .or_else(imds)
         .or_else(Region::new("us-east-1"))
 }
 
@@ -270,6 +293,37 @@ mod tests {
         assert_eq!(sanitize_region(Some(String::new())), None);
         assert_eq!(sanitize_region(Some("   ".into())), None);
         assert_eq!(sanitize_region(None), None);
+    }
+
+    /// An IMDS endpoint that accepts connections and never answers gives up
+    /// within the short bound instead of the SDK's 1 s timeouts.
+    #[tokio::test]
+    async fn imds_region_lookup_gives_up_quickly() {
+        use aws_config::imds::region::ImdsRegionProvider;
+        use std::time::{Duration, Instant};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let client = super::imds_region_client()
+            .endpoint(format!("http://{}", addr))
+            .unwrap()
+            .build();
+        let provider = ImdsRegionProvider::builder().imds_client(client).build();
+
+        let started = Instant::now();
+        assert_eq!(provider.region().await, None);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "IMDS region lookup took {:?}",
+            elapsed
+        );
     }
 
     mod debug_log {
