@@ -56,8 +56,8 @@ keyring = { version = "3.6", default-features = false, features = [
 ] }
 
 # TUI
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
 
 # Serialization
 serde = { version = "1.0.210", features = ["derive"] }
