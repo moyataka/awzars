@@ -172,24 +172,46 @@ fn load_or_init_store(profile: &str) -> Result<CachedStore> {
     load_or_init_from_entry(&entry, now_unix_secs())
 }
 
+/// Load the keystore for decrypting. Unlike `load_or_init_store`, a missing
+/// keystore is an error and nothing is created: a new key could never decrypt
+/// an existing cookie file.
+fn load_store(profile: &str) -> Result<CachedStore> {
+    let keyring = KeyringStorage::new(profile)?;
+    let entry = keyring.entry_for_field("cookie_key")?;
+    load_from_entry(&entry, now_unix_secs())?.ok_or_else(|| {
+        AwzarsError::Storage(
+            "No cookie encryption key in the keyring (deleted, or never created) \
+             — re-authenticate to regenerate"
+                .into(),
+        )
+    })
+}
+
+/// Load the keystore from `entry`, or `None` when the entry does not exist.
+/// Any other keychain read error is returned.
+fn load_from_entry(entry: &Entry, now: i64) -> Result<Option<CachedStore>> {
+    // `read_secret` returns the value wrapped in `Zeroizing`, so the
+    // base64-encoded cookie keys are wiped from heap after we parse.
+    let Some(value) = read_secret(entry, "the cookie encryption key")? else {
+        return Ok(None);
+    };
+    let store = parse_keystore(&value, now)?;
+    // If we read the legacy single-key format, persist the JSON
+    // version so the next read takes the fast path.
+    let is_legacy = serde_json::from_str::<KeyStoreJson>(&value).is_err();
+    if is_legacy {
+        save_keystore_to_entry(entry, &store)?;
+    }
+    Ok(Some(store))
+}
+
 /// Load the keystore from `entry`, creating and saving a new one only when
 /// the entry does not exist. Any other keychain read error is returned and
 /// nothing is written, so an existing keystore is never replaced because it
 /// could not be read.
 fn load_or_init_from_entry(entry: &Entry, now: i64) -> Result<CachedStore> {
-    // `read_secret` returns the value wrapped in `Zeroizing`, so the
-    // base64-encoded cookie keys are wiped from heap after we parse.
-    match read_secret(entry, "the cookie encryption key")? {
-        Some(value) => {
-            let store = parse_keystore(&value, now)?;
-            // If we read the legacy single-key format, persist the JSON
-            // version so the next read takes the fast path.
-            let is_legacy = serde_json::from_str::<KeyStoreJson>(&value).is_err();
-            if is_legacy {
-                save_keystore_to_entry(entry, &store)?;
-            }
-            Ok(store)
-        }
+    match load_from_entry(entry, now)? {
+        Some(store) => Ok(store),
         None => {
             let key = generate_key()?;
             let mut keys = BTreeMap::new();
@@ -363,7 +385,7 @@ pub fn decrypt(profile: &str, data: &[u8]) -> Result<Vec<u8>> {
     let key_bytes = if let Some(k) = cache_lookup_specific(profile, key_id) {
         k
     } else {
-        let store = load_or_init_store(profile)?;
+        let store = load_store(profile)?;
         let key = store
             .keys
             .get(&key_id)
@@ -646,5 +668,45 @@ mod tests {
             let reloaded = load_or_init_from_entry(&entry, now).unwrap();
             assert_eq!(*reloaded.keys[&1], *original.keys[&1]);
         }
+    }
+
+    #[test]
+    fn decrypt_without_keystore_does_not_create_one() {
+        crate::storage::keyring::test_keychain::install();
+        let profile = "cookie-decrypt-no-keystore";
+        let data = encrypt_with_key(1, &[7u8; 32], b"{}");
+
+        assert!(decrypt(profile, &data).is_err());
+
+        let entry = KeyringStorage::new(profile)
+            .unwrap()
+            .entry_for_field("cookie_key")
+            .unwrap();
+        assert!(
+            matches!(entry.get_password(), Err(keyring::Error::NoEntry)),
+            "a read must not create a cookie key"
+        );
+    }
+
+    #[test]
+    fn encrypt_creates_keystore_and_decrypt_reads_it() {
+        crate::storage::keyring::test_keychain::install();
+        let profile = "cookie-encrypt-creates-keystore";
+
+        let data = encrypt(profile, b"{\"v\":1}").unwrap();
+        let entry = KeyringStorage::new(profile)
+            .unwrap()
+            .entry_for_field("cookie_key")
+            .unwrap();
+        assert!(entry.get_password().is_ok(), "encrypt must create the key");
+
+        // Read through the keychain, not the per-process cache.
+        STORE_CACHE
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .remove(profile);
+        assert_eq!(decrypt(profile, &data).unwrap(), b"{\"v\":1}");
     }
 }

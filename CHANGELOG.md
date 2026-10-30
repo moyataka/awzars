@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - With `CHROME_REMOTE_URL` set, `login` and `credential-process` close only the tab they opened and disconnect, instead of quitting the remote Chrome (#109).
 - `login`, `list-roles` and `credential-process` check the profile's `app_id_uri` from `config.toml` before signing in, and report an invalid value as a configuration error that names the profile and field (#115).
 - `configure` keeps a profile's tenant ID, app ID URI, session duration and "stay logged in" setting when the matching flag isn't passed, so `--non-interactive` no longer blanks them or clears stored credentials, and pressing Enter at the session duration prompt keeps the current value. A missing `--role-arn` still clears the role (#54, #92).
+- Reading a saved browser session no longer creates a cookie key in the OS keychain when none exists; the session is reported as unreadable instead, as before (#50).
 
 ## [1.0.5] - 2026-10-26
 
