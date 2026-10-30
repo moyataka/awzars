@@ -453,6 +453,19 @@ mod tests {
     }
 
     #[test]
+    fn generated_keys_are_random() {
+        let first = generate_key().unwrap();
+        let second = generate_key().unwrap();
+        assert_ne!(first, second, "two generated keys must differ");
+        for key in [first, second] {
+            assert!(
+                key.iter().any(|&byte| byte != key[0]),
+                "a generated key must not repeat one byte"
+            );
+        }
+    }
+
+    #[test]
     fn test_encrypt_decrypt_roundtrip() {
         let key = [42u8; 32];
         let plaintext = br#"{"version":1,"cookies":[{"name":"test","value":"abc"}]}"#;
