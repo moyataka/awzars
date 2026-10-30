@@ -28,6 +28,7 @@ pub async fn execute(args: &Args) -> Result<()> {
     // login, so we treat it the same as `login` and allow inline prompts.
     // `--session-remember` opts into persisting AI consent.
     crate::auth::lock::enforce(&args.profile, profile, true, session_remember)?;
+    profile.validate_app_id_uri(&args.profile)?;
 
     // Start browser automation.
     // Pre-flight: pick headless only when a session exists (cookie store or

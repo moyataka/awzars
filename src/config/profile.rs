@@ -85,6 +85,22 @@ impl Profile {
             lock_ai_markers: None,
         }
     }
+
+    /// Check the stored `app_id_uri` with the same rules as `--azure-app`
+    /// before it is used for a browser sign-in. A hand-edited value would
+    /// otherwise fail later with a less clear error from Azure or the SAML
+    /// audience check.
+    pub fn validate_app_id_uri(&self, profile_name: &str) -> Result<()> {
+        crate::cli::args::parse_app_id_uri(&self.azure.app_id_uri)
+            .map(|_| ())
+            .map_err(|e| {
+                AwzarsError::Config(format!(
+                    "profile '{p}': app_id_uri in config.toml is not valid: {e}. \
+                     Fix it with `awzars configure --profile {p}`.",
+                    p = profile_name,
+                ))
+            })
+    }
 }
 
 /// Maximum size of `config.toml` in bytes. A genuine config holding many
@@ -199,5 +215,52 @@ impl Config {
     /// List all profile names
     pub fn list_profiles(&self) -> Vec<&String> {
         self.profiles.keys().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile_with_app_id_uri(app_id_uri: &str) -> Profile {
+        Profile::new(AzureConfig::new(
+            "11111111-2222-3333-4444-aaaaaaaaaaaa",
+            app_id_uri,
+        ))
+    }
+
+    #[test]
+    fn validate_app_id_uri_accepts_https_and_urn() {
+        for uri in [
+            "https://signin.aws.amazon.com/saml",
+            "urn:amazon:webservices",
+        ] {
+            assert!(
+                profile_with_app_id_uri(uri)
+                    .validate_app_id_uri("work")
+                    .is_ok(),
+                "{uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_app_id_uri_names_profile_and_field() {
+        for uri in [
+            "",
+            "http://example.com/saml",
+            "https://signin.aws.amazon.com/saml ",
+            "urn:x",
+            "https://example.com/<a>",
+        ] {
+            let error = profile_with_app_id_uri(uri)
+                .validate_app_id_uri("work")
+                .unwrap_err();
+            let AwzarsError::Config(message) = &error else {
+                panic!("expected a config error for {uri:?}, got {error:?}");
+            };
+            assert!(message.contains("profile 'work'"), "{message}");
+            assert!(message.contains("app_id_uri"), "{message}");
+        }
     }
 }

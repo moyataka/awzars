@@ -555,7 +555,12 @@ pub async fn execute(args: &Args) -> Result<()> {
         return output_credentials(&creds, &login_args, args.quiet);
     }
 
-    // Build Azure configuration (allow CLI overrides)
+    // Build Azure configuration (allow CLI overrides). `--azure-app` is
+    // already checked by clap; a stored value is checked here, before any
+    // prompt or browser.
+    if login_args.azure_app.is_none() {
+        profile.validate_app_id_uri(&args.profile)?;
+    }
     let tenant_id = login_args
         .azure_tenant
         .as_ref()
