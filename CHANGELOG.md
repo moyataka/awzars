@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A TUI save reads the AWS config file again right before replacing it. If another program changed it after the save read it, the TUI's change is applied again to the new contents (up to three tries) instead of overwriting the outside edit. If the file keeps changing, nothing is written (#53).
 - A sign-in with a visible browser now warns when the saved browser session can't be used, for example because a plaintext `cookies.json` from an older version is still on disk, and shows how to remove it. Before, this was logged only with `-vv` (#58).
 - When no region is configured, sign-in waits at most 500 ms for the EC2 instance metadata service before falling back to `us-east-1`, instead of about a second (#113).
+- The "AI context detected" and "password-locked" errors, and the AI consent prompts, now name the session the unlock applies to. Inside Claude Code they explain how to unlock for that session, including a password-locked profile, instead of pointing to the terminal session (#111).
 
 ## [1.0.5] - 2026-10-26
 

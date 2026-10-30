@@ -639,6 +639,89 @@ fn session_scope() -> Result<SessionScope> {
     Ok(SessionScope::Sid(terminal_session_sid()?))
 }
 
+/// The kind of session an unlock would be scoped to, for user-facing text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeKind {
+    /// The terminal session (`sid-`).
+    Terminal,
+    /// The Claude Code session (`claude-`).
+    ClaudeCode,
+    /// The `AWZARS_SESSION_ID` session (`env-`).
+    Explicit,
+}
+
+impl ScopeKind {
+    /// The session an unlock in this process applies to.
+    pub fn label(self) -> &'static str {
+        match self {
+            ScopeKind::Terminal => "this terminal session",
+            ScopeKind::ClaudeCode => "this Claude Code session",
+            ScopeKind::Explicit => "this AWZARS_SESSION_ID session",
+        }
+    }
+}
+
+/// The kind of scope [`session_scope`] resolves to here. Falls back to
+/// `Terminal` when the scope cannot be resolved.
+pub fn current_scope_kind() -> ScopeKind {
+    match session_scope() {
+        Ok(SessionScope::Claude(_)) => ScopeKind::ClaudeCode,
+        Ok(SessionScope::Explicit(_)) => ScopeKind::Explicit,
+        _ => ScopeKind::Terminal,
+    }
+}
+
+/// How to unlock `profile` so that a token counts in a `kind` scope.
+/// `allow_ai` adds `--allow-ai`; `password` means the unlock asks for the
+/// profile's password, which needs a terminal.
+fn unlock_hint(profile: &str, kind: ScopeKind, allow_ai: bool, password: bool) -> String {
+    let command = format!(
+        "awzars --profile {}{}",
+        profile,
+        if allow_ai {
+            " unlock --allow-ai"
+        } else {
+            " unlock"
+        }
+    );
+    match kind {
+        ScopeKind::ClaudeCode if password => format!(
+            "{}A command run from Claude Code cannot prompt for the password. Run \
+             `! echo $CLAUDE_CODE_SESSION_ID` in this Claude Code session to get its id, \
+             then in a terminal run `CLAUDE_CODE_SESSION_ID=<id> {}`.",
+            if allow_ai {
+                "The profile is password-locked. "
+            } else {
+                ""
+            },
+            command
+        ),
+        ScopeKind::ClaudeCode => format!(
+            "Run `{}` inside this Claude Code session (for example with the `!` prefix) \
+             to grant AI access for this conversation. An unlock run in another terminal \
+             does not apply here.",
+            command
+        ),
+        ScopeKind::Explicit if allow_ai => format!(
+            "Run `{}` with the same AWZARS_SESSION_ID set to grant AI access for that session.",
+            command
+        ),
+        ScopeKind::Explicit => format!(
+            "Run `{}` interactively with the same AWZARS_SESSION_ID set to unlock for that \
+             session.",
+            command
+        ),
+        ScopeKind::Terminal if allow_ai => format!(
+            "Run `{}` to grant AI access for this terminal session.",
+            command
+        ),
+        ScopeKind::Terminal => format!(
+            "Run `{}` interactively to unlock for this terminal session.",
+            command
+        ),
+    }
+}
+
 // --- Boot binding ---
 
 /// A boot id is a dashed UUID: 36 characters of hex digits and `-`.
@@ -1222,6 +1305,7 @@ fn enforce_in_boot(
             return Err(AwzarsError::AiContextBlocked {
                 profile: profile_name.to_string(),
                 marker,
+                hint: unlock_hint(profile_name, current_scope_kind(), true, true),
             });
         }
 
@@ -1240,6 +1324,7 @@ fn enforce_in_boot(
 
         return Err(AwzarsError::LockedProfile {
             profile: profile_name.to_string(),
+            hint: unlock_hint(profile_name, current_scope_kind(), false, true),
         });
     }
 
@@ -1265,8 +1350,10 @@ fn enforce_in_boot(
         let prompt = if persist_consent {
             format!(
                 "AI context detected ({}). Allow AI agents to use AWS credentials \
-                 for profile '{}' for the rest of this terminal session?",
-                marker, profile_name
+                 for profile '{}' for the rest of {}?",
+                marker,
+                profile_name,
+                current_scope_kind().label()
             )
         } else {
             format!(
@@ -1284,6 +1371,7 @@ fn enforce_in_boot(
             return Err(AwzarsError::AiContextBlocked {
                 profile: profile_name.to_string(),
                 marker,
+                hint: unlock_hint(profile_name, current_scope_kind(), true, false),
             });
         }
         if persist_consent {
@@ -1297,6 +1385,7 @@ fn enforce_in_boot(
     Err(AwzarsError::AiContextBlocked {
         profile: profile_name.to_string(),
         marker: ai_marker.expect("checked above"),
+        hint: unlock_hint(profile_name, current_scope_kind(), true, false),
     })
 }
 
@@ -1391,6 +1480,107 @@ mod tests {
 
     fn is_already_unlocked(outcome: Result<GateOutcome>) -> bool {
         matches!(outcome, Ok(GateOutcome::AlreadyUnlocked))
+    }
+
+    #[test]
+    fn refusals_say_how_to_unlock_in_the_scope_that_was_checked() {
+        const MARKER: &str = "AWZARS_HINT_TEST_MARKER";
+        let _g = temp_xdg();
+        std::env::set_var(MARKER, "1");
+        let prof = format!("hint_{}", std::process::id());
+        let unlocked = Profile {
+            lock_ai_markers: Some(vec![MARKER.into()]),
+            ..Default::default()
+        };
+        let locked_ai = Profile {
+            lock_verifier: Some(TEST_VERIFIER.into()),
+            lock_ai_markers: Some(vec![MARKER.into()]),
+            ..Default::default()
+        };
+        let locked = locked_profile(TEST_VERIFIER);
+        let message = |profile: &Profile| match enforce(&prof, profile, false, false) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("expected a refusal"),
+        };
+        let ai = format!("AI context detected ({MARKER}) for profile '{prof}'.");
+        let password = format!("Profile '{prof}' is password-locked.");
+
+        // Terminal scope: the wording is unchanged.
+        assert_eq!(current_scope_kind(), ScopeKind::Terminal);
+        let terminal_ai = format!(
+            "{ai} Run `awzars --profile {prof} unlock --allow-ai` to grant AI access \
+             for this terminal session."
+        );
+        assert_eq!(message(&unlocked), terminal_ai);
+        assert_eq!(message(&locked_ai), terminal_ai);
+        assert_eq!(
+            message(&locked),
+            format!(
+                "{password} Run `awzars --profile {prof} unlock` interactively to unlock \
+                 for this terminal session."
+            )
+        );
+
+        // Claude Code scope: an unlock from another terminal does not count,
+        // and a `!` command has no terminal for a password prompt.
+        std::env::set_var(
+            "CLAUDE_CODE_SESSION_ID",
+            "11111111-2222-3333-4444-aaaaaaaaaaaa",
+        );
+        assert_eq!(current_scope_kind(), ScopeKind::ClaudeCode);
+        assert_eq!(
+            message(&unlocked),
+            format!(
+                "{ai} Run `awzars --profile {prof} unlock --allow-ai` inside this Claude \
+                 Code session (for example with the `!` prefix) to grant AI access for \
+                 this conversation. An unlock run in another terminal does not apply here."
+            )
+        );
+        let claude_password = "A command run from Claude Code cannot prompt for the \
+             password. Run `! echo $CLAUDE_CODE_SESSION_ID` in this Claude Code session to \
+             get its id, then in a terminal run `CLAUDE_CODE_SESSION_ID=<id> awzars";
+        assert_eq!(
+            message(&locked_ai),
+            format!(
+                "{ai} The profile is password-locked. {claude_password} --profile {prof} \
+                 unlock --allow-ai`."
+            )
+        );
+        assert_eq!(
+            message(&locked),
+            format!("{password} {claude_password} --profile {prof} unlock`.")
+        );
+
+        // AWZARS_SESSION_ID scope: the unlock needs the same value.
+        std::env::set_var("AWZARS_SESSION_ID", "hint_test");
+        assert_eq!(current_scope_kind(), ScopeKind::Explicit);
+        let explicit_ai = format!(
+            "{ai} Run `awzars --profile {prof} unlock --allow-ai` with the same \
+             AWZARS_SESSION_ID set to grant AI access for that session."
+        );
+        assert_eq!(message(&unlocked), explicit_ai);
+        assert_eq!(message(&locked_ai), explicit_ai);
+        assert_eq!(
+            message(&locked),
+            format!(
+                "{password} Run `awzars --profile {prof} unlock` interactively with the \
+                 same AWZARS_SESSION_ID set to unlock for that session."
+            )
+        );
+
+        std::env::remove_var("AWZARS_SESSION_ID");
+        std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+        std::env::remove_var(MARKER);
+    }
+
+    #[test]
+    fn scope_labels_name_each_session_kind() {
+        assert_eq!(ScopeKind::Terminal.label(), "this terminal session");
+        assert_eq!(ScopeKind::ClaudeCode.label(), "this Claude Code session");
+        assert_eq!(
+            ScopeKind::Explicit.label(),
+            "this AWZARS_SESSION_ID session"
+        );
     }
 
     #[test]

@@ -123,9 +123,10 @@ pub fn run(
     if stdin_is_tty {
         let answer = dialoguer::Confirm::new()
             .with_prompt(format!(
-                "Profile '{}' is not password-locked. Grant AI agents session \
-                 consent to use it from this terminal?",
-                profile_name
+                "Profile '{}' is not password-locked. Grant AI agents consent to \
+                 use it for the rest of {}?",
+                profile_name,
+                lock::current_scope_kind().label()
             ))
             .default(false)
             .interact()
