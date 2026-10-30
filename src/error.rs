@@ -75,19 +75,17 @@ pub enum AwzarsError {
     #[error("Dialog error: {0}")]
     Dialog(String),
 
-    #[error(
-        "Profile '{profile}' is password-locked. Run \
-         `awzars --profile {profile} unlock` interactively to unlock for this \
-         terminal session."
-    )]
-    LockedProfile { profile: String },
+    /// `hint` says how to unlock in the session scope that was checked.
+    #[error("Profile '{profile}' is password-locked. {hint}")]
+    LockedProfile { profile: String, hint: String },
 
-    #[error(
-        "AI context detected ({marker}) for profile '{profile}'. Run \
-         `awzars --profile {profile} unlock --allow-ai` to grant AI access \
-         for this terminal session."
-    )]
-    AiContextBlocked { profile: String, marker: String },
+    /// `hint` says how to unlock in the session scope that was checked.
+    #[error("AI context detected ({marker}) for profile '{profile}'. {hint}")]
+    AiContextBlocked {
+        profile: String,
+        marker: String,
+        hint: String,
+    },
 
     #[error("Incorrect password.")]
     LockVerificationFailed,
