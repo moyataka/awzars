@@ -956,6 +956,70 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stdout).contains("\"Version\""));
     }
 
+    #[tokio::test]
+    async fn invalid_stored_app_id_uri_is_checked_unless_overridden() {
+        use clap::Parser;
+        if let Ok(directory) = std::env::var("AWZARS_LOGIN_APP_ID_URI_DIRECTORY") {
+            config::set_config_dir_override(&directory).unwrap();
+            let mut profile = crate::config::Profile::new(crate::config::AzureConfig::new(
+                "11111111-2222-3333-4444-aaaaaaaaaaaa",
+                "http://example.com/saml",
+            ));
+            profile.lock_ai_markers = Some(vec![]);
+            profile.remember_me = Some(false);
+            let mut config = Config::default();
+            config.set_profile("default", profile);
+            config.save().unwrap();
+            let mut arguments = vec!["awzars", "login"];
+            let overridden = std::env::var("AWZARS_LOGIN_APP_ID_URI_OVERRIDE").is_ok();
+            if overridden {
+                arguments.extend(["--azure-app", "https://signin.aws.amazon.com/saml"]);
+            }
+            let error = execute(&Args::try_parse_from(arguments).unwrap())
+                .await
+                .unwrap_err();
+            // With the override, sign-in goes on to the browser, which
+            // refuses the `ws://` remote URL.
+            match (&error, overridden) {
+                (AwzarsError::Config(message), false) => {
+                    assert!(message.contains("app_id_uri"), "{message}")
+                }
+                (AwzarsError::Browser(_), true) => {}
+                _ => panic!("unexpected error (override: {overridden}): {error:?}"),
+            }
+            return;
+        }
+        // The child runs `execute`. A `ws://` remote URL without
+        // `--allow-insecure-remote-chrome` is refused before connecting, so
+        // no case can open Chrome.
+        for overridden in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "cli::commands::login::tests::invalid_stored_app_id_uri_is_checked_unless_overridden",
+                    "--nocapture",
+                ])
+                .env("AWZARS_LOGIN_APP_ID_URI_DIRECTORY", directory.path())
+                .env("CHROME_REMOTE_URL", "ws://127.0.0.1:9/devtools/browser/test")
+                .env_remove("AWZARS_AZURE_TENANT_ID")
+                .env_remove("AWZARS_AZURE_APP_ID_URI");
+            if overridden {
+                command.env("AWZARS_LOGIN_APP_ID_URI_OVERRIDE", "1");
+            } else {
+                command.env_remove("AWZARS_LOGIN_APP_ID_URI_OVERRIDE");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "override: {overridden}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     fn login_arguments() -> LoginArgs {
         LoginArgs {
             azure_tenant: None,
