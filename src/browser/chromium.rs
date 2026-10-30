@@ -209,6 +209,13 @@ fn refuse_if_legacy_cookies_present_at(legacy: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether `shutdown` closes the whole browser. Only a Chrome that awzars
+/// launched is closed; a remote Chrome belongs to the operator, so awzars
+/// closes just its own page there and disconnects.
+fn should_close_browser(is_remote: bool) -> bool {
+    !is_remote
+}
+
 /// Azure AD login browser automation
 pub struct AzureLoginBrowser {
     browser: Option<Browser>,
@@ -216,6 +223,9 @@ pub struct AzureLoginBrowser {
     headless: bool,
     remember_me: bool,
     is_remote: bool,
+    /// CDP event loop for a remote Chrome. Aborted on shutdown to drop the
+    /// connection; it does not end on its own while the browser stays open.
+    remote_handler: Option<tokio::task::JoinHandle<()>>,
     quiet: bool,
     profile: String,
     /// Ephemeral directory for non-remember-me sessions. Held so that it is
@@ -294,7 +304,7 @@ impl AzureLoginBrowser {
             .map_err(|e| AwzarsError::Browser(format!("Failed to connect to remote Chrome: {}. Verify CHROME_REMOTE_URL points to a running Chrome DevTools endpoint.", e)))?;
 
         // Spawn handler task
-        tokio::spawn(async move {
+        let remote_handler = tokio::spawn(async move {
             while let Some(event) = handler.next().await {
                 if event.is_err() {
                     tracing::trace!("Browser handler event: {:?}", event);
@@ -308,6 +318,7 @@ impl AzureLoginBrowser {
             headless,
             remember_me,
             is_remote: true,
+            remote_handler: Some(remote_handler),
             quiet: false,
             profile: profile.to_string(),
             _ephemeral_dir: None,
@@ -426,6 +437,7 @@ impl AzureLoginBrowser {
             headless,
             remember_me,
             is_remote: false,
+            remote_handler: None,
             quiet: false,
             profile: profile.to_string(),
             _ephemeral_dir: ephemeral_dir,
@@ -470,16 +482,30 @@ impl AzureLoginBrowser {
         super::saml_capture::capture(&page, &login_url, timeout).await
     }
 
-    /// Gracefully close the browser process (or CDP session for remote Chrome).
+    /// Gracefully close the browser process, or for a remote Chrome close
+    /// only the page awzars opened and disconnect, leaving the browser open.
     ///
     /// Must be called before `AzureLoginBrowser` is dropped to suppress
     /// chromiumoxide's "Browser was not closed manually" WARN. Takes the
     /// `Browser` out of the `Option` so it cannot be used after shutdown.
     pub async fn shutdown(&mut self) {
-        if let Some(mut browser) = self.browser.take() {
+        let page = self.page.take();
+        let Some(mut browser) = self.browser.take() else {
+            return;
+        };
+        if should_close_browser(self.is_remote) {
             if let Err(e) = browser.close().await {
-                tracing::debug!("Browser close returned error (expected for remote): {}", e);
+                tracing::debug!("Browser close returned error: {}", e);
             }
+            return;
+        }
+        if let Some(page) = page {
+            if let Err(e) = page.close().await {
+                tracing::debug!("Closing the remote page returned error: {}", e);
+            }
+        }
+        if let Some(handler) = self.remote_handler.take() {
+            handler.abort();
         }
     }
 
@@ -1083,5 +1109,91 @@ mod tests {
         assert_eq!(parsed.cookies.len(), 1);
         assert_eq!(parsed.cookies[0].name, "ESTSAUTH");
         assert_eq!(parsed.cookies[0].same_site, Some("Lax".into()));
+    }
+
+    #[test]
+    fn test_shutdown_closes_only_a_browser_awzars_launched() {
+        assert!(should_close_browser(false));
+        assert!(!should_close_browser(true));
+    }
+
+    /// Start a throwaway headless Chrome with a temporary profile and remote
+    /// debugging on a free port. Returns the child, the profile dir and the
+    /// `ws://` browser endpoint read from `DevToolsActivePort`.
+    fn launch_throwaway_chrome() -> (std::process::Child, tempfile::TempDir, u16, String) {
+        let exe = find_chrome_executable().expect("no Chrome/Chromium found");
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut child = std::process::Command::new(exe)
+            .arg("--headless=new")
+            .arg("--remote-debugging-port=0")
+            .arg(format!("--user-data-dir={}", dir.path().display()))
+            .arg("--no-first-run")
+            .arg("--no-default-browser-check")
+            .arg("about:blank")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let port_file = dir.path().join("DevToolsActivePort");
+        for _ in 0..200 {
+            if let Ok(text) = std::fs::read_to_string(&port_file) {
+                let mut lines = text.lines();
+                if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
+                    let port: u16 = port.parse().unwrap();
+                    let ws = format!("ws://127.0.0.1:{}{}", port, path);
+                    return (child, dir, port, ws);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("Chrome did not write DevToolsActivePort");
+    }
+
+    #[tokio::test]
+    #[ignore = "launches a local headless Chrome; run with `cargo test -- --ignored`"]
+    async fn test_remote_shutdown_keeps_remote_chrome_running() {
+        let (mut chrome, _profile, port, ws_url) = launch_throwaway_chrome();
+
+        let mut awz = AzureLoginBrowser::connect_remote(&ws_url, true, true, false, "test")
+            .await
+            .unwrap();
+        let page = awz
+            .browser
+            .as_ref()
+            .unwrap()
+            .new_page("about:blank")
+            .await
+            .unwrap();
+        let own_target = page.target_id().inner().clone();
+        awz.page = Some(page);
+
+        awz.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let still_running = chrome.try_wait().unwrap().is_none();
+        let targets: Vec<serde_json::Value> = if still_running {
+            reqwest::get(format!("http://127.0.0.1:{}/json/list", port))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap()
+        } else {
+            Vec::new()
+        };
+        let _ = chrome.kill();
+        let _ = chrome.wait();
+
+        assert!(still_running, "shutdown closed the remote Chrome");
+        assert!(
+            !targets.iter().any(|t| t["id"] == own_target.as_str()),
+            "the page awzars opened is still open"
+        );
+        assert!(
+            targets.iter().any(|t| t["type"] == "page"),
+            "the operator's own tab was closed"
+        );
     }
 }
