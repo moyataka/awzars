@@ -102,6 +102,7 @@ async fn refresh_credentials(
 ) -> Result<CredentialProcessOutput> {
     // Credentials expired or missing — auto-login
     tracing::info!("Credentials expired, attempting automatic re-authentication");
+    profile.validate_app_id_uri(profile_name)?;
 
     let role_arn = profile.role_arn.clone().ok_or_else(|| {
         AwzarsError::Config(format!(
@@ -201,5 +202,22 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("\"Version\""), "{stdout}");
         assert!(stdout.contains("cached-output"), "{stdout}");
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_invalid_stored_app_id_uri_as_config_error() {
+        let mut profile = Profile::new(crate::config::AzureConfig::new(
+            "11111111-2222-3333-4444-aaaaaaaaaaaa",
+            "http://example.com/saml",
+        ));
+        profile.role_arn = Some("arn:aws:iam::123456789012:role/Example".to_string());
+        let error = refresh_credentials("app-id-uri-check", &profile, true, false, false, false)
+            .await
+            .unwrap_err();
+        let AwzarsError::Config(message) = &error else {
+            panic!("expected a config error, got {error:?}");
+        };
+        assert!(message.contains("'app-id-uri-check'"), "{message}");
+        assert!(message.contains("app_id_uri"), "{message}");
     }
 }

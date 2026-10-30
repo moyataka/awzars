@@ -28,6 +28,7 @@ pub async fn execute(args: &Args) -> Result<()> {
     // login, so we treat it the same as `login` and allow inline prompts.
     // `--session-remember` opts into persisting AI consent.
     crate::auth::lock::enforce(&args.profile, profile, true, session_remember)?;
+    profile.validate_app_id_uri(&args.profile)?;
 
     // Start browser automation.
     // Pre-flight: pick headless only when a session exists (cookie store or
@@ -107,4 +108,56 @@ pub async fn execute(args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_stored_app_id_uri_is_a_config_error() {
+        use clap::Parser;
+        if let Ok(directory) = std::env::var("AWZARS_LIST_ROLES_APP_ID_URI_DIRECTORY") {
+            crate::config::set_config_dir_override(&directory).unwrap();
+            let mut profile = crate::config::Profile::new(crate::config::AzureConfig::new(
+                "11111111-2222-3333-4444-aaaaaaaaaaaa",
+                "http://example.com/saml",
+            ));
+            profile.lock_ai_markers = Some(vec![]);
+            let mut config = Config::default();
+            config.set_profile("default", profile);
+            config.save().unwrap();
+            let error = execute(&Args::try_parse_from(["awzars", "list-roles"]).unwrap())
+                .await
+                .unwrap_err();
+            let crate::error::AwzarsError::Config(message) = &error else {
+                panic!("expected a config error, got {error:?}");
+            };
+            assert!(message.contains("app_id_uri"), "{message}");
+            return;
+        }
+        // The child runs `execute`. A `ws://` remote URL without
+        // `--allow-insecure-remote-chrome` is refused before connecting, so a
+        // missing check fails with a browser error instead of opening Chrome.
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::commands::list_roles::tests::invalid_stored_app_id_uri_is_a_config_error",
+                "--nocapture",
+            ])
+            .env("AWZARS_LIST_ROLES_APP_ID_URI_DIRECTORY", directory.path())
+            .env(
+                "CHROME_REMOTE_URL",
+                "ws://127.0.0.1:9/devtools/browser/test",
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
