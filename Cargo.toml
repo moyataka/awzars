@@ -91,7 +91,7 @@ directories = "6.0"
 zeroize = { version = "1.8", features = ["derive"] }
 
 # Cookie store encryption
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 getrandom = "0.4"
 
 # URL parsing/validation
