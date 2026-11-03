@@ -300,3 +300,194 @@ fn aws_edit_keeps_duplicate_and_default_sections_byte_identical() {
         contents.replacen("us-west-2", "ap-southeast-2", 1)
     );
 }
+
+/// Runs `name` in a child test process with `directory` as the config
+/// directory, HOME and cache, so the process-wide config directory override
+/// and any session-token cleanup stay in a temporary directory.
+fn run_in_child(name: &str, variable: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &format!("tui::manager::handlers::tests::{name}")])
+        .env(variable, directory.path())
+        .env("HOME", directory.path())
+        .env("XDG_CACHE_HOME", directory.path())
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn tui_profile() -> Profile {
+    Profile {
+        azure: AzureConfig::new(
+            "11111111-2222-3333-4444-aaaaaaaaaaaa",
+            "https://signin.aws.amazon.com/saml",
+        ),
+        ..Default::default()
+    }
+}
+
+/// A config with an empty AWS config file in `directory`, so the manager
+/// never reads the user's AWS config.
+fn tui_config(directory: &str) -> Config {
+    let aws_path = std::path::Path::new(directory).join("aws-config");
+    std::fs::write(&aws_path, "").unwrap();
+    Config {
+        aws_config_path: Some(aws_path.to_string_lossy().into()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn profile_save_keeps_changes_made_outside_the_tui() {
+    const TEST_DIRECTORY: &str = "AWZARS_TUI_OUTSIDE_CHANGE_TEST";
+    let Ok(directory) = std::env::var(TEST_DIRECTORY) else {
+        return run_in_child(
+            "profile_save_keeps_changes_made_outside_the_tui",
+            TEST_DIRECTORY,
+        );
+    };
+    crate::config::set_config_dir_override(&directory).unwrap();
+    let mut config = tui_config(&directory);
+    config.set_profile("dev", tui_profile());
+    config.set_profile("prod", tui_profile());
+    config.save().unwrap();
+    let mut manager = ConfigManager::new(Config::load().unwrap()).unwrap();
+
+    // While the TUI is open, another program adds a profile, changes
+    // another profile and sets a password lock on the profile being edited.
+    let mut outside = Config::load().unwrap();
+    outside.set_profile("outside", tui_profile());
+    outside.get_profile_mut("prod").unwrap().region = Some("ap-south-1".into());
+    outside.get_profile_mut("dev").unwrap().lock_verifier = Some("outside-verifier".into());
+    outside.save().unwrap();
+
+    let mut form = ProfileForm::from_profile("dev", &tui_profile());
+    form.fields[5].value = "eu-west-1".into();
+    manager.form = Some(form);
+    manager.save_awzars_form();
+    assert_eq!(manager.status.as_ref().unwrap().0, StatusLevel::Success);
+
+    let saved = Config::load().unwrap();
+    assert!(saved.profiles.contains_key("outside"));
+    assert_eq!(saved.profiles["prod"].region.as_deref(), Some("ap-south-1"));
+    assert_eq!(saved.profiles["dev"].region.as_deref(), Some("eu-west-1"));
+    assert_eq!(
+        saved.profiles["dev"].lock_verifier.as_deref(),
+        Some("outside-verifier")
+    );
+    // The view now shows what was written, outside changes included.
+    assert!(manager.config.profiles.contains_key("outside"));
+
+    // Adding a profile under a name that now exists on disk is refused.
+    let mut outside = Config::load().unwrap();
+    outside.set_profile("outside-2", tui_profile());
+    outside.save().unwrap();
+    let before_add = std::fs::read(crate::config::config_file().unwrap()).unwrap();
+    let mut form = ProfileForm::clone_from("dev", &tui_profile());
+    form.fields[0].value = "outside-2".into();
+    manager.form = Some(form);
+    manager.save_awzars_form();
+    let (level, message) = manager.status.clone().unwrap();
+    assert_eq!(level, StatusLevel::Error);
+    assert!(message.contains("already exists"), "{message}");
+    assert_eq!(
+        std::fs::read(crate::config::config_file().unwrap()).unwrap(),
+        before_add
+    );
+}
+
+#[test]
+fn profile_save_writes_nothing_when_config_does_not_load() {
+    const TEST_DIRECTORY: &str = "AWZARS_TUI_FRESH_LOAD_FAILURE_TEST";
+    let Ok(directory) = std::env::var(TEST_DIRECTORY) else {
+        return run_in_child(
+            "profile_save_writes_nothing_when_config_does_not_load",
+            TEST_DIRECTORY,
+        );
+    };
+    crate::config::set_config_dir_override(&directory).unwrap();
+    let mut config = tui_config(&directory);
+    config.set_profile("dev", tui_profile());
+    config.save().unwrap();
+    let mut manager = ConfigManager::new(Config::load().unwrap()).unwrap();
+
+    let path = crate::config::config_file().unwrap();
+    let broken = "[profiles.dev]\nrole_arn = \"unterminated\n";
+    std::fs::write(&path, broken).unwrap();
+
+    let mut form = ProfileForm::from_profile("dev", &tui_profile());
+    form.fields[5].value = "eu-west-1".into();
+    manager.form = Some(form);
+    manager.save_awzars_form();
+    let (level, message) = manager.status.clone().unwrap();
+    assert_eq!(level, StatusLevel::Error);
+    assert!(message.contains("could not be loaded"), "{message}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+    assert!(manager.form.is_some());
+}
+
+#[test]
+fn failed_reload_after_delete_does_not_bring_the_profile_back() {
+    const TEST_DIRECTORY: &str = "AWZARS_TUI_RELOAD_FAILURE_TEST";
+    let Ok(directory) = std::env::var(TEST_DIRECTORY) else {
+        return run_in_child(
+            "failed_reload_after_delete_does_not_bring_the_profile_back",
+            TEST_DIRECTORY,
+        );
+    };
+    crate::config::set_config_dir_override(&directory).unwrap();
+    let path = crate::config::config_file().unwrap();
+    // `kept` has a long marker list. Written compactly it loads, but a save
+    // puts one item per line, which takes config.toml past the 1 MiB load
+    // limit, so the reload after the delete fails.
+    let kept = Profile {
+        lock_ai_markers: Some(vec!["A".to_string(); 180_000]),
+        ..tui_profile()
+    };
+    let mut config = tui_config(&directory);
+    config.set_profile("kept", kept);
+    config.set_profile("deleted-profile", tui_profile());
+    let compact = toml::to_string(&config).unwrap();
+    assert!(compact.len() < 1 << 20);
+    std::fs::write(&path, compact).unwrap();
+    let mut manager = ConfigManager::new(Config::load().unwrap()).unwrap();
+
+    manager.mode = Mode::DeleteConfirm {
+        target: "deleted-profile".into(),
+        is_awzars: true,
+    };
+    manager.handle_delete_confirm(KeyCode::Char('y')).unwrap();
+    assert!(Config::load().is_err());
+    let (level, message) = manager.status.clone().unwrap();
+    assert_eq!(level, StatusLevel::Warning);
+    assert!(message.contains("could not be reloaded"), "{message}");
+    assert!(!manager
+        .profile_names
+        .contains(&"deleted-profile".to_string()));
+
+    // While config.toml doesn't load, a save is refused and writes nothing.
+    let before = std::fs::read(&path).unwrap();
+    let mut form = ProfileForm::from_profile("kept", &tui_profile());
+    form.fields[5].value = "eu-west-1".into();
+    manager.form = Some(form);
+    manager.save_awzars_form();
+    assert_eq!(manager.status.as_ref().unwrap().0, StatusLevel::Error);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    // Once it loads again, the same save goes through and the deleted
+    // profile stays deleted.
+    let mut fixed = tui_config(&directory);
+    fixed.set_profile("kept", tui_profile());
+    fixed.save().unwrap();
+    manager.save_awzars_form();
+    assert_eq!(manager.status.as_ref().unwrap().0, StatusLevel::Success);
+    let saved = Config::load().unwrap();
+    assert!(!saved.profiles.contains_key("deleted-profile"));
+    assert_eq!(saved.profiles["kept"].region.as_deref(), Some("eu-west-1"));
+}

@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Unit tests always use an in-memory keychain, so `cargo test` never creates, reads or deletes entries in the developer's OS keychain, whatever the test order (#68).
 - `configure`, `login --azure-app` and the TUI accept `urn:` app ID URIs such as `urn:amazon:webservices`, and `&` and `'` in the URI. Whitespace and control characters are now rejected (#104).
 - `awzars tui` exits with the load error when `config.toml` exists but can't be loaded, instead of opening with no profiles and replacing the file on the first save (#91).
+- When the TUI can't reload `config.toml` after setting a password or deleting a profile, it shows the error instead of carrying on with its old copy. A later profile save no longer writes that copy back, which could drop the new password lock or bring back the deleted profile (#108).
+- A profile save in `awzars tui` reads `config.toml` again just before writing and changes only that profile, so changes made outside the TUI while it is open (another profile, a password lock, a hand edit) are kept. If the file doesn't load, the save is refused with the load error and nothing is written (#142).
 - With `CHROME_REMOTE_URL` set, `login` and `credential-process` close only the tab they opened and disconnect, instead of quitting the remote Chrome (#109).
 - `login`, `list-roles` and `credential-process` check the profile's `app_id_uri` from `config.toml` before signing in, and report an invalid value as a configuration error that names the profile and field (#115).
 - `login` uses the profile's `no_sandbox` setting as `credential-process` does, so `--no-sandbox` is no longer needed on every login for such a profile (#140).

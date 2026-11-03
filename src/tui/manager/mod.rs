@@ -241,23 +241,48 @@ impl ConfigManager {
         terminal.clear().tui()?;
 
         // Lock state lives in the on-disk config, so any successful run mutated
-        // a file we no longer mirror in memory — reload to keep edits coherent.
-        if let Ok(cfg) = Config::load() {
-            self.config = cfg;
-        }
+        // a file we no longer mirror in memory — reload so the view matches.
+        let reload_error = self.reload_config();
 
         match (result, &action) {
             (Ok(()), PendingAction::SetPassword { name }) => {
-                self.status = Some((
-                    StatusLevel::Success,
-                    format!("Password lock set on '{}'", name),
-                ));
+                self.status = Some(match reload_error {
+                    None => (
+                        StatusLevel::Success,
+                        format!("Password lock set on '{}'", name),
+                    ),
+                    Some(note) => (
+                        StatusLevel::Warning,
+                        format!("Password lock set on '{}', but {}", name, note),
+                    ),
+                });
             }
             (Err(e), _) => {
-                self.status = Some((StatusLevel::Error, format!("Set-password failed: {}", e)));
+                let mut message = format!("Set-password failed: {}", e);
+                if let Some(note) = reload_error {
+                    message.push_str(&format!("; {}", note));
+                }
+                self.status = Some((StatusLevel::Error, message));
             }
         }
         Ok(())
+    }
+
+    /// Reload config.toml after a flow that changed it on disk, so the
+    /// lists show the change. Every config.toml write loads the file again
+    /// first, so a failed reload only leaves the view out of date; the
+    /// returned text says so in the status line.
+    fn reload_config(&mut self) -> Option<String> {
+        match Config::load() {
+            Ok(cfg) => {
+                self.config = cfg;
+                None
+            }
+            Err(e) => Some(format!(
+                "config.toml could not be reloaded ({}), so the list may be out of date",
+                e
+            )),
+        }
     }
 
     // ---- Key routing ----
