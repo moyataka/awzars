@@ -179,14 +179,7 @@ async fn launch_browser_for_login(params: &LoginParams) -> Result<AzureLoginBrow
         }
     }
 
-    // Use a cookie store from a prior remembered login if one exists,
-    // even if --remember-me was passed: a persistent user-data-dir would
-    // race with any other Chrome holding the profile via SingletonLock.
-    let remember_me_for_launch = if use_cookie_store {
-        false
-    } else {
-        params.remember_me
-    };
+    let remember_me_for_launch = use_persistent_profile(use_cookie_store, params.remember_me);
 
     // SECURITY: tenant IDs are PII-adjacent (aid targeted phishing). Only the
     // first 8 chars appear in logs at any verbosity, so -vvv output is safe
@@ -206,6 +199,15 @@ async fn launch_browser_for_login(params: &LoginParams) -> Result<AzureLoginBrow
     .await?;
     browser.set_quiet(params.quiet);
     Ok(browser)
+}
+
+/// Whether Chrome launches with the profile's persistent user-data-dir.
+///
+/// A cookie store from a prior remembered login is used if one exists,
+/// even with remember-me: a persistent user-data-dir would race with any
+/// other Chrome holding the profile via SingletonLock.
+pub(crate) fn use_persistent_profile(has_cookie_store: bool, remember_me: bool) -> bool {
+    remember_me && !has_cookie_store
 }
 
 /// Drive the browser through Azure AD login and return the SAML response.
