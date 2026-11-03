@@ -159,7 +159,8 @@ fn error_to_exit_code(e: &AwzarsError) -> u8 {
         AwzarsError::Dialog(_) => 6,
         AwzarsError::Io(_) => 1,
         AwzarsError::Json(_) => 1,
-        AwzarsError::Toml(_) => 1,
+        // Only config.toml is read or written as TOML, so this is a config error.
+        AwzarsError::Toml(_) => 2,
         AwzarsError::Http(_) => 4,
         AwzarsError::LockedProfile { .. } => 7,
         AwzarsError::AiContextBlocked { .. } => 8,
