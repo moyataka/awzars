@@ -367,11 +367,13 @@ pub fn encrypt(profile: &str, json: &[u8]) -> Result<Vec<u8>> {
         }
         let store = rotated_store;
 
-        let key = store.keys.get(&store.current.get()).ok_or_else(|| {
-            AwzarsError::Storage("Current cookie key missing from keystore".into())
-        })?;
+        let Some(bytes) = store.keys.get(&store.current.get()).map(|key| **key) else {
+            cache_replace(profile, store);
+            return Err(AwzarsError::Storage(
+                "Current cookie key missing from keystore".into(),
+            ));
+        };
         let id = store.current.get();
-        let bytes: [u8; 32] = **key;
         cache_replace(profile, store);
         (id, bytes)
     };
@@ -827,6 +829,35 @@ mod tests {
         assert_eq!(entry.get_password().unwrap(), saved);
         // The cache keeps the saved key 1, not the unsaved rotated key 2.
         assert_eq!(cache_lookup(profile), Some((1, [1u8; 32])));
+    }
+
+    #[test]
+    fn encrypt_keeps_cached_keystore_when_current_key_is_missing() {
+        crate::storage::keyring::test_keychain::install();
+        let profile = "cookie-current-key-missing";
+        // The saved keystore names current id 1 but only holds key 2, so
+        // encrypt loads it and then fails.
+        let mut keys = BTreeMap::new();
+        keys.insert(2u8, Zeroizing::new([2u8; 32]));
+        let broken = CachedStore {
+            current: nz(1),
+            keys,
+            created_at: BTreeMap::new(),
+        };
+        let entry = KeyringStorage::new(profile)
+            .unwrap()
+            .entry_for_field("cookie_key")
+            .unwrap();
+        save_keystore_to_entry(&entry, &broken).unwrap();
+
+        assert!(encrypt(profile, b"{}").is_err());
+
+        // Key 2 still decrypts from the cache, without another keychain read.
+        assert_eq!(
+            cache_lookup_specific(profile, 2),
+            Some([2u8; 32]),
+            "the loaded keystore must be cached"
+        );
     }
 
     #[test]
