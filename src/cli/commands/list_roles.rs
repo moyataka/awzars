@@ -207,14 +207,23 @@ mod tests {
         // A persistent Chrome profile is reused headless only with
         // remember_me, and remember_me alone needs that profile to exist.
         profile.remember_me = Some(true);
-        assert_eq!(browser_options("default", &profile, false), (false, true));
+        assert_eq!(
+            browser_options("default", &profile, false),
+            (false, true, true)
+        );
         let store = crate::config::chromium_data_dir("default")
             .unwrap()
             .join("cookies.enc");
         std::fs::create_dir_all(store.parent().unwrap()).unwrap();
-        assert_eq!(browser_options("default", &profile, false), (true, true));
+        assert_eq!(
+            browser_options("default", &profile, false),
+            (true, true, true)
+        );
         profile.remember_me = None;
-        assert_eq!(browser_options("default", &profile, false), (false, true));
+        assert_eq!(
+            browser_options("default", &profile, false),
+            (false, true, false)
+        );
 
         // A cookie store from an earlier remembered sign-in: headless.
         std::fs::write(&store, b"").unwrap();
