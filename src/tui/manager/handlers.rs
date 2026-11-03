@@ -202,8 +202,21 @@ impl ConfigManager {
 
         match form.to_profile() {
             Ok((name, mut profile)) => {
+                // Read config.toml again right before writing and change only
+                // this profile, so changes made outside the TUI since it was
+                // loaded are kept. The re-read is best effort: no file lock.
+                let mut updated_config = match crate::config::Config::load() {
+                    Ok(config) => config,
+                    Err(e) => {
+                        self.status = Some((
+                            StatusLevel::Error,
+                            format!("Not saved: config.toml could not be loaded: {}", e),
+                        ));
+                        return;
+                    }
+                };
                 if form.original_name.as_deref() != Some(name.as_str())
-                    && self.config.profiles.contains_key(&name)
+                    && updated_config.profiles.contains_key(&name)
                 {
                     self.status = Some((
                         StatusLevel::Error,
@@ -220,7 +233,7 @@ impl ConfigManager {
                 let prev_profile = form
                     .original_name
                     .as_deref()
-                    .and_then(|n| self.config.profiles.get(n))
+                    .and_then(|n| updated_config.profiles.get(n))
                     .cloned();
 
                 if let Some(ref prev) = prev_profile {
@@ -234,7 +247,6 @@ impl ConfigManager {
                     .map(|prev| crate::config::cleanup::credential_identity_changed(prev, &profile))
                     .unwrap_or(false);
 
-                let mut updated_config = self.config.clone();
                 updated_config.set_profile(&name, profile);
                 if let Err(e) = updated_config.save() {
                     self.status = Some((StatusLevel::Error, format!("Save failed: {}", e)));
@@ -561,8 +573,11 @@ impl ConfigManager {
                         }
                         Ok(report) => {
                             // Reload config from disk so in-memory state matches.
-                            if let Ok(cfg) = crate::config::Config::load() {
-                                self.config = cfg;
+                            // If that fails, at least drop the deleted profile
+                            // from the view.
+                            let reload_error = self.reload_config();
+                            if reload_error.is_some() {
+                                self.config.remove_profile(&target);
                             }
                             self.profile_names = self.config.profiles.keys().cloned().collect();
                             self.profile_names.sort();
@@ -602,6 +617,14 @@ impl ConfigManager {
                                 self.status = Some((
                                     StatusLevel::Success,
                                     format!("Profile '{}' deleted", target),
+                                ));
+                            }
+                            if let Some(note) = reload_error {
+                                let deleted =
+                                    self.status.take().map(|(_, m)| m).unwrap_or_default();
+                                self.status = Some((
+                                    StatusLevel::Warning,
+                                    format!("{}; but {}", deleted, note),
                                 ));
                             }
                         }

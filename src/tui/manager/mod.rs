@@ -241,23 +241,29 @@ impl ConfigManager {
         terminal.clear().tui()?;
 
         // Lock state lives in the on-disk config, so any successful run mutated
-        // a file we no longer mirror in memory — reload to keep edits coherent.
-        if let Ok(cfg) = Config::load() {
-            self.config = cfg;
-        }
+        // a file we no longer mirror in memory — reload so the view matches.
+        let reload_error = self.reload_config();
 
-        match (result, &action) {
-            (Ok(()), PendingAction::SetPassword { name }) => {
-                self.status = Some((
-                    StatusLevel::Success,
-                    format!("Password lock set on '{}'", name),
-                ));
-            }
-            (Err(e), _) => {
-                self.status = Some((StatusLevel::Error, format!("Set-password failed: {}", e)));
-            }
-        }
+        let PendingAction::SetPassword { name } = &action;
+        self.status = Some(set_password_status(&result, name, reload_error));
         Ok(())
+    }
+
+    /// Reload config.toml after a flow that changed it on disk, so the
+    /// lists show the change. Every config.toml write loads the file again
+    /// first, so a failed reload only leaves the view out of date; the
+    /// returned text says so in the status line.
+    fn reload_config(&mut self) -> Option<String> {
+        match Config::load() {
+            Ok(cfg) => {
+                self.config = cfg;
+                None
+            }
+            Err(e) => Some(format!(
+                "config.toml could not be reloaded ({}), so the list may be out of date",
+                e
+            )),
+        }
     }
 
     // ---- Key routing ----
@@ -353,9 +359,74 @@ impl ConfigManager {
 mod handlers;
 mod render;
 
+/// Status line after the TUI's set-password flow, with the reload error (if
+/// the config could not be reloaded afterwards) added to it.
+fn set_password_status(
+    result: &Result<()>,
+    name: &str,
+    reload_error: Option<String>,
+) -> (StatusLevel, String) {
+    match result {
+        Ok(()) => match reload_error {
+            None => (
+                StatusLevel::Success,
+                format!("Password lock set on '{}'", name),
+            ),
+            Some(note) => (
+                StatusLevel::Warning,
+                format!("Password lock set on '{}', but {}", name, note),
+            ),
+        },
+        Err(e) => {
+            let mut message = format!("Set-password failed: {}", e);
+            if let Some(note) = reload_error {
+                message.push_str(&format!("; {}", note));
+            }
+            (StatusLevel::Error, message)
+        }
+    }
+}
+
 fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x
         && col < rect.x.saturating_add(rect.width)
         && row >= rect.y
         && row < rect.y.saturating_add(rect.height)
+}
+
+#[cfg(test)]
+mod set_password_status_tests {
+    use super::*;
+    use crate::error::AwzarsError;
+
+    #[test]
+    fn set_password_status_reports_the_result_and_any_reload_error() {
+        let note = || Some("config.toml could not be reloaded (x)".to_string());
+        assert_eq!(
+            set_password_status(&Ok(()), "work", None),
+            (
+                StatusLevel::Success,
+                "Password lock set on 'work'".to_string()
+            )
+        );
+
+        let (level, message) = set_password_status(&Ok(()), "work", note());
+        assert_eq!(level, StatusLevel::Warning);
+        assert_eq!(
+            message,
+            "Password lock set on 'work', but config.toml could not be reloaded (x)"
+        );
+
+        let failed = || Err(AwzarsError::LockVerificationFailed);
+        let (level, message) = set_password_status(&failed(), "work", None);
+        assert_eq!(level, StatusLevel::Error);
+        assert_eq!(message, "Set-password failed: Incorrect password.");
+
+        let (level, message) = set_password_status(&failed(), "work", note());
+        assert_eq!(level, StatusLevel::Error);
+        assert_eq!(
+            message,
+            "Set-password failed: Incorrect password.; config.toml could not be reloaded (x)"
+        );
+    }
 }

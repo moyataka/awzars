@@ -19,8 +19,9 @@ pub async fn execute(_args: &Args) -> Result<()> {
 }
 
 /// Load the config the TUI edits. A missing file gives an empty config, but a
-/// file that exists and fails to load is an error: the TUI saves the whole
-/// config back, so starting from an empty one would overwrite the file.
+/// file that exists and fails to load is an error: the TUI would otherwise
+/// open with no profiles. Each profile save loads the file again before
+/// writing, so this copy is only the starting view.
 fn load_config() -> Result<Config> {
     Config::load()
 }
