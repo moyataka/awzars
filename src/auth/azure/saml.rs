@@ -558,6 +558,42 @@ mod tests {
     }
 
     #[test]
+    fn role_pairs_with_one_arn_outside_the_aws_partition_are_rejected() {
+        let original = "<saml:AttributeValue>arn:aws:iam::123456789012:role/MyRole,arn:aws:iam::123456789012:saml-provider/MyProvider</saml:AttributeValue>";
+        for partition in ["aws-cn", "aws-us-gov"] {
+            for (role_partition, provider_partition) in [("aws", partition), (partition, "aws")] {
+                let pair = format!(
+                    "<saml:AttributeValue>arn:{role_partition}:iam::123456789012:role/MyRole,\
+                     arn:{provider_partition}:iam::123456789012:saml-provider/MyProvider\
+                     </saml:AttributeValue>"
+                );
+                let err = SamlAssertion::parse(
+                    &encode(&valid_xml().replace(original, &pair)),
+                    TENANT_ID,
+                    AUDIENCE,
+                )
+                .unwrap_err();
+                assert!(
+                    matches!(err, AwzarsError::Saml(ref m) if m.contains("only the `aws` partition")),
+                    "{role_partition}/{provider_partition}: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn assertion_without_roles_is_not_a_partition_error() {
+        let original = "<saml:AttributeValue>arn:aws:iam::123456789012:role/MyRole,arn:aws:iam::123456789012:saml-provider/MyProvider</saml:AttributeValue>";
+        let assertion = SamlAssertion::parse(
+            &encode(&valid_xml().replace(original, "")),
+            TENANT_ID,
+            AUDIENCE,
+        )
+        .unwrap();
+        assert!(assertion.roles().is_empty());
+    }
+
+    #[test]
     fn role_pairs_reject_wrong_resource_kinds_and_malformed_arns() {
         let role = "arn:aws:iam::123456789012:role/Role";
         let provider = "arn:aws:iam::123456789012:saml-provider/Provider";
