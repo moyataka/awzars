@@ -306,7 +306,9 @@ fn aws_edit_keeps_duplicate_and_default_sections_byte_identical() {
 /// and any session-token cleanup stay in a temporary directory.
 fn run_in_child(name: &str, variable: &str) {
     let directory = tempfile::tempdir().unwrap();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    // Re-runs this test binary itself, not an external program.
+    let test_binary = std::env::current_exe().unwrap(); // nosemgrep: rust.lang.security.current-exe.current-exe
+    let output = std::process::Command::new(test_binary)
         .args(["--exact", &format!("tui::manager::handlers::tests::{name}")])
         .env(variable, directory.path())
         .env("HOME", directory.path())
