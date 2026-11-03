@@ -31,7 +31,7 @@ pub async fn execute(args: &Args) -> Result<()> {
         if let Some(ref cfg) = config_args {
             if cfg.non_interactive {
                 // Use provided values
-                non_interactive_values(config.get_profile(&args.profile).ok(), cfg)
+                non_interactive_values(config.get_profile(&args.profile).ok(), cfg)?
             } else {
                 // Interactive mode with defaults from args
                 interactive_configure(&config, &args.profile, Some(cfg))?
@@ -113,11 +113,28 @@ type InteractiveConfigureResult = (String, String, Option<String>, i32, Option<b
 
 /// Values for `--non-interactive`. A flag that is not given keeps the existing
 /// profile's value, except `--role-arn`: without it the role is cleared.
+/// A new profile has no stored tenant ID or app ID URI, so both flags are
+/// required to create one.
 fn non_interactive_values(
     existing: Option<&Profile>,
     args: &ConfigureArgs,
-) -> InteractiveConfigureResult {
-    (
+) -> Result<InteractiveConfigureResult> {
+    if existing.is_none() {
+        let mut missing = Vec::new();
+        if args.azure_tenant.is_none() {
+            missing.push("--azure-tenant");
+        }
+        if args.azure_app.is_none() {
+            missing.push("--azure-app");
+        }
+        if !missing.is_empty() {
+            return Err(AwzarsError::Config(format!(
+                "creating a profile with --non-interactive needs {}",
+                missing.join(" and ")
+            )));
+        }
+    }
+    Ok((
         args.azure_tenant
             .clone()
             .or_else(|| existing.map(|p| p.azure.tenant_id.clone()))
@@ -131,7 +148,7 @@ fn non_interactive_values(
             .or_else(|| existing.map(|p| p.azure.session_duration))
             .unwrap_or(3600),
         existing.and_then(|p| p.remember_me),
-    )
+    ))
 }
 
 fn interactive_configure(
@@ -337,7 +354,7 @@ mod tests {
         };
 
         let (tenant, app, role, duration, remember) =
-            non_interactive_values(Some(&existing), &args);
+            non_interactive_values(Some(&existing), &args).unwrap();
 
         assert_eq!(tenant, "11111111-2222-3333-4444-aaaaaaaaaaaa");
         assert_eq!(app, "https://stored.example/app");
@@ -359,7 +376,7 @@ mod tests {
         };
 
         let (tenant_id, app_id_uri, role_arn, session_duration, remember_me) =
-            non_interactive_values(Some(&existing), &args);
+            non_interactive_values(Some(&existing), &args).unwrap();
         let azure = AzureConfig {
             tenant_id,
             app_id_uri,
@@ -387,7 +404,7 @@ mod tests {
         };
 
         let (tenant, app, role, duration, remember) =
-            non_interactive_values(Some(&existing), &args);
+            non_interactive_values(Some(&existing), &args).unwrap();
 
         assert_eq!(tenant, "11111111-2222-3333-4444-bbbbbbbbbbbb");
         assert_eq!(app, "https://new.example/app");
@@ -397,19 +414,52 @@ mod tests {
     }
 
     #[test]
+    fn non_interactive_new_profile_requires_tenant_and_app() {
+        let cases = [
+            (None, None, "needs --azure-tenant and --azure-app"),
+            (
+                Some("11111111-2222-3333-4444-bbbbbbbbbbbb"),
+                None,
+                "needs --azure-app",
+            ),
+            (
+                None,
+                Some("https://new.example/app"),
+                "needs --azure-tenant",
+            ),
+        ];
+        for (tenant, app, expected) in cases {
+            let args = ConfigureArgs {
+                azure_tenant: tenant.map(String::from),
+                azure_app: app.map(String::from),
+                role_arn: None,
+                session_duration: None,
+                non_interactive: true,
+            };
+            match non_interactive_values(None, &args) {
+                Err(AwzarsError::Config(message)) => {
+                    assert!(message.ends_with(expected), "{message}");
+                }
+                Err(other) => panic!("expected a config error, got {other:?}"),
+                Ok(values) => panic!("a new profile was accepted: {values:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn non_interactive_new_profile_uses_defaults() {
         let args = ConfigureArgs {
-            azure_tenant: None,
-            azure_app: None,
+            azure_tenant: Some("11111111-2222-3333-4444-bbbbbbbbbbbb".into()),
+            azure_app: Some("https://new.example/app".into()),
             role_arn: None,
             session_duration: None,
             non_interactive: true,
         };
 
-        let (tenant, app, role, duration, remember) = non_interactive_values(None, &args);
+        let (tenant, app, role, duration, remember) = non_interactive_values(None, &args).unwrap();
 
-        assert_eq!(tenant, "");
-        assert_eq!(app, "");
+        assert_eq!(tenant, "11111111-2222-3333-4444-bbbbbbbbbbbb");
+        assert_eq!(app, "https://new.example/app");
         assert_eq!(role, None);
         assert_eq!(duration, 3600);
         assert_eq!(remember, None);
