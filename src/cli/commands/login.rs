@@ -1099,7 +1099,9 @@ mod tests {
         // no case can open Chrome.
         for overridden in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            // Re-runs this test binary itself, not an external program.
+            let test_binary = std::env::current_exe().unwrap(); // nosemgrep: rust.lang.security.current-exe.current-exe
+            let mut command = std::process::Command::new(test_binary);
             command
                 .args([
                     "--exact",
