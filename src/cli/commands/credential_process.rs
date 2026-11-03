@@ -103,6 +103,7 @@ async fn refresh_credentials(
     // Credentials expired or missing — auto-login
     tracing::info!("No reusable AWS credentials found; attempting automatic re-authentication");
     profile.validate_app_id_uri(profile_name)?;
+    profile.validate_role_arn(profile_name)?;
 
     let role_arn = profile.role_arn.clone().ok_or_else(|| {
         AwzarsError::Config(format!(

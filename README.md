@@ -68,6 +68,13 @@ remains the mature, widely-deployed option.
   `login` session leader, so there the token relies on the session id, the
   boot binding and the TTL (documented in `SECURITY_AUDIT.md` as `L-2`).
 - **macOS (Apple Silicon) and Linux only.** Windows is not supported yet.
+- **Commercial AWS partition only.** Sign-in goes through
+  `signin.aws.amazon.com`, so roles must be in the `aws` partition. Role ARNs
+  in `aws-cn` (China) or `aws-us-gov` (GovCloud) are rejected when you enter
+  them (`configure`, `--role-arn`, the TUI) and when `login` or
+  `credential-process` reads one from `config.toml`. Roles in those
+  partitions in the SAML assertion are not offered, and an assertion that has
+  only such roles is rejected.
 - **No Node.js plugin ecosystem.** If your workflow extends aws-azure-login
   via a Node.js wrapper, you'll need to re-shape that integration around the
   CLI surface.

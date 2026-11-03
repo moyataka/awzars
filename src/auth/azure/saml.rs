@@ -236,6 +236,7 @@ fn find_assertion_node<'a, 'input>(
 /// Extract roles from the scoped SAML `<Assertion>` subtree.
 fn extract_roles(assertion: Node) -> Result<HashMap<String, String>> {
     let mut roles = HashMap::new();
+    let mut other_partition = 0;
 
     for node in assertion.descendants() {
         if !is_saml_tag(&node, "AttributeStatement") {
@@ -249,7 +250,11 @@ fn extract_roles(assertion: Node) -> Result<HashMap<String, String>> {
                 if is_saml_tag(&value, "AttributeValue") {
                     if let Some(text) = value.text() {
                         if let Some((role, principal)) = parse_role_value(text) {
-                            roles.insert(role, principal);
+                            if is_supported_partition(&role) && is_supported_partition(&principal) {
+                                roles.insert(role, principal);
+                            } else {
+                                other_partition += 1;
+                            }
                         }
                     }
                 }
@@ -257,11 +262,29 @@ fn extract_roles(assertion: Node) -> Result<HashMap<String, String>> {
         }
     }
 
+    if other_partition > 0 {
+        tracing::warn!(
+            "Ignoring {} SAML role(s) outside the `aws` partition",
+            other_partition
+        );
+        if roles.is_empty() {
+            return Err(AwzarsError::Saml(
+                "SAML assertion offers only roles outside the `aws` partition; \
+                 only the `aws` partition is supported (aws-cn and aws-us-gov are not)"
+                    .to_string(),
+            ));
+        }
+    }
     if roles.is_empty() {
         tracing::warn!("No AWS roles found in SAML assertion");
     }
 
     Ok(roles)
+}
+
+/// Whether an ARN already accepted by [`IamArn::parse`] is in the `aws` partition.
+fn is_supported_partition(arn: &str) -> bool {
+    IamArn::parse(arn).is_some_and(IamArn::is_supported_partition)
 }
 
 /// Check if an attribute is the AWS Role attribute
@@ -424,7 +447,7 @@ mod tests {
     #[test]
     fn role_order_is_stable_across_assertions_and_input_order() {
         let roles = [
-            "arn:aws-us-gov:iam::111111111111:role/Alpha",
+            "arn:aws:iam::111111111111:role/Alpha",
             "arn:aws:iam::111111111111:role/Zebra",
             "arn:aws:iam::222222222222:role/Alpha",
         ];
@@ -475,24 +498,62 @@ mod tests {
     }
 
     #[test]
-    fn role_pairs_accept_both_orders_and_supported_partitions() {
+    fn role_pairs_accept_both_orders() {
         let original = "arn:aws:iam::123456789012:role/MyRole,arn:aws:iam::123456789012:saml-provider/MyProvider";
-        for partition in ["aws", "aws-cn", "aws-us-gov"] {
-            let role = format!("arn:{partition}:iam::123456789012:role/team/MyRole");
+        let role = "arn:aws:iam::123456789012:role/team/MyRole";
+        let provider = "arn:aws:iam::123456789012:saml-provider/MyProvider";
+        for pair in [
+            format!("{role},{provider}"),
+            format!(" {provider}, {role} "),
+        ] {
+            let assertion = SamlAssertion::parse(
+                &encode(&valid_xml().replace(original, &pair)),
+                TENANT_ID,
+                AUDIENCE,
+            )
+            .unwrap();
+            assert_eq!(
+                assertion.principal_for_role(role),
+                Some(provider.to_string())
+            );
+            assert_eq!(crate::cli::args::parse_role_arn(role).unwrap(), role);
+        }
+    }
+
+    #[test]
+    fn roles_outside_the_aws_partition_are_rejected() {
+        let original = "<saml:AttributeValue>arn:aws:iam::123456789012:role/MyRole,arn:aws:iam::123456789012:saml-provider/MyProvider</saml:AttributeValue>";
+        let aws_role = "arn:aws:iam::123456789012:role/MyRole";
+        for partition in ["aws-cn", "aws-us-gov"] {
+            let role = format!("arn:{partition}:iam::123456789012:role/MyRole");
             let provider = format!("arn:{partition}:iam::123456789012:saml-provider/MyProvider");
-            for pair in [
-                format!("{role},{provider}"),
-                format!(" {provider}, {role} "),
-            ] {
-                let assertion = SamlAssertion::parse(
-                    &encode(&valid_xml().replace(original, &pair)),
-                    TENANT_ID,
-                    AUDIENCE,
-                )
-                .unwrap();
-                assert_eq!(assertion.principal_for_role(&role), Some(provider.clone()));
-                assert_eq!(crate::cli::args::parse_role_arn(&role).unwrap(), role);
-            }
+            let other = format!("<saml:AttributeValue>{role},{provider}</saml:AttributeValue>");
+
+            // Only roles in another partition: the assertion is rejected.
+            let err = SamlAssertion::parse(
+                &encode(&valid_xml().replace(original, &other)),
+                TENANT_ID,
+                AUDIENCE,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, AwzarsError::Saml(ref m) if m.contains("only the `aws` partition")),
+                "{err}"
+            );
+
+            // Mixed with an `aws` role: only the `aws` role is offered.
+            let assertion = SamlAssertion::parse(
+                &encode(&valid_xml().replace(original, &format!("{original}{other}"))),
+                TENANT_ID,
+                AUDIENCE,
+            )
+            .unwrap();
+            let roles: Vec<_> = assertion.roles().into_iter().map(|(r, _)| r).collect();
+            assert_eq!(roles, vec![aws_role.to_string()]);
+
+            // A role ARN from a flag, the configure prompt or the TUI form.
+            let message = crate::cli::args::parse_role_arn(&role).unwrap_err();
+            assert!(message.contains("only the `aws` partition"), "{message}");
         }
     }
 

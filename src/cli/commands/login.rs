@@ -590,6 +590,9 @@ pub async fn execute(args: &Args) -> Result<()> {
     if login_args.azure_app.is_none() {
         profile.validate_app_id_uri(&args.profile)?;
     }
+    if login_args.role_arn.is_none() {
+        profile.validate_role_arn(&args.profile)?;
+    }
     let tenant_id = login_args
         .azure_tenant
         .as_ref()
