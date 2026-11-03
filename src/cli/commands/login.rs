@@ -641,7 +641,7 @@ pub async fn execute(args: &Args) -> Result<()> {
         region: profile.region.clone(),
         session_duration: login_args.resolved_session_duration(&profile.azure),
         headless: login_args.headless,
-        no_sandbox: login_args.no_sandbox,
+        no_sandbox: login_args.resolved_no_sandbox(profile),
         remember_me,
         allow_insecure_remote_chrome: login_args.allow_insecure_remote_chrome,
     };

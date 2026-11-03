@@ -250,6 +250,11 @@ impl LoginArgs {
         self.session_duration.unwrap_or(azure.session_duration)
     }
 
+    /// `--no-sandbox`, or the profile's `no_sandbox`, as for credential-process.
+    pub fn resolved_no_sandbox(&self, profile: &crate::config::Profile) -> bool {
+        self.no_sandbox || profile.no_sandbox.unwrap_or(false)
+    }
+
     pub fn refresh_requested(&self) -> bool {
         self.force_refresh || self.session_duration.is_some()
     }
@@ -528,6 +533,21 @@ mod tests {
         let login = LoginArgs::from_command(&arguments.command).unwrap();
         assert_eq!(login.resolved_session_duration(&azure), 7200);
         assert!(login.refresh_requested());
+    }
+
+    #[test]
+    fn login_no_sandbox_uses_cli_or_profile() {
+        let mut profile = crate::config::Profile::default();
+        let arguments = Args::try_parse_from(["awzars", "login"]).unwrap();
+        let login = LoginArgs::from_command(&arguments.command).unwrap();
+        assert!(!login.resolved_no_sandbox(&profile));
+        profile.no_sandbox = Some(true);
+        assert!(login.resolved_no_sandbox(&profile));
+
+        let arguments = Args::try_parse_from(["awzars", "login", "--no-sandbox"]).unwrap();
+        let login = LoginArgs::from_command(&arguments.command).unwrap();
+        profile.no_sandbox = Some(false);
+        assert!(login.resolved_no_sandbox(&profile));
     }
 
     #[test]
