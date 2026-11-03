@@ -25,7 +25,7 @@ use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU8;
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
 use zeroize::{Zeroize, Zeroizing};
 
 /// How long a key remains the "current" key before rotation triggers.
@@ -302,9 +302,21 @@ fn cache_replace(profile: &str, store: CachedStore) {
 /// Wipe all in-memory key material. Call before `std::process::exit` or from
 /// a panic hook so keys do not linger in heap memory after the process is gone.
 pub fn cleanup_keys() {
-    let mut guard = match STORE_CACHE.lock() {
+    wipe_cache(&STORE_CACHE);
+}
+
+/// Drop every keystore in `cache`, unless its lock is held.
+///
+/// The panic hook calls this, and the panic may come from a thread that
+/// already holds the lock (inside `encrypt` or `decrypt`). Locking a std
+/// `Mutex` again on that thread may deadlock, so a held lock skips the wipe
+/// instead of waiting. A poisoned lock is not held: its holder panicked and
+/// released it while unwinding, so the keys are still wiped.
+fn wipe_cache(cache: &Mutex<Option<HashMap<String, CachedStore>>>) {
+    let mut guard = match cache.try_lock() {
         Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return,
     };
     // Dropping the HashMap drops every CachedStore, which drops every
     // Zeroizing<[u8; 32]>, which zeroes the bytes.
@@ -616,6 +628,74 @@ mod tests {
         assert!(!store.keys.contains_key(&1), "key 1 should be GC'd");
         assert!(store.keys.contains_key(&2), "key 2 should be retained");
         assert!(store.keys.contains_key(&3));
+    }
+
+    fn one_key_store() -> CachedStore {
+        let mut keys = BTreeMap::new();
+        keys.insert(1u8, Zeroizing::new([1u8; 32]));
+        let mut created_at = BTreeMap::new();
+        created_at.insert(1u8, now_unix_secs());
+        CachedStore {
+            current: nz(1),
+            keys,
+            created_at,
+        }
+    }
+
+    fn cache_with_one_store() -> Mutex<Option<HashMap<String, CachedStore>>> {
+        let mut map = HashMap::new();
+        map.insert("p".to_string(), one_key_store());
+        Mutex::new(Some(map))
+    }
+
+    #[test]
+    fn wipe_cache_drops_keys_when_unlocked() {
+        let cache = cache_with_one_store();
+        wipe_cache(&cache);
+        assert!(cache.lock().unwrap().is_none(), "keys must be wiped");
+    }
+
+    #[test]
+    fn wipe_cache_returns_while_lock_is_held() {
+        // A panic inside encrypt/decrypt runs the hook with the lock held.
+        // The wipe must return instead of waiting for the lock. It runs on a
+        // second thread with a time limit so a regression fails the test
+        // rather than hanging the suite.
+        let cache = cache_with_one_store();
+        let returned = std::thread::scope(|s| {
+            let guard = cache.lock().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let cache = &cache;
+            s.spawn(move || {
+                wipe_cache(cache);
+                let _ = tx.send(());
+            });
+            let returned = rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+            // Let a blocked wipe finish so the scope can end.
+            drop(guard);
+            returned
+        });
+        assert!(returned, "wipe_cache blocked on a held lock");
+        assert!(
+            cache.lock().unwrap().is_some(),
+            "a held lock skips the wipe"
+        );
+    }
+
+    #[test]
+    fn wipe_cache_drops_keys_when_poisoned() {
+        let cache = cache_with_one_store();
+        let _ = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _guard = cache.lock().unwrap();
+                panic!("poison the cache lock");
+            })
+            .join()
+        });
+        assert!(cache.is_poisoned());
+        wipe_cache(&cache);
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(guard.is_none(), "a poisoned lock must still be wiped");
     }
 
     fn mock_entry() -> Entry {

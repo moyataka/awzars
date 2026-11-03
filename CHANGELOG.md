@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - When no region is configured, sign-in waits at most 500 ms for the EC2 instance metadata service before falling back to `us-east-1`, instead of about a second (#113).
 - The "AI context detected" and "password-locked" errors, and the AI consent prompts, now name the session the unlock applies to. Inside Claude Code they explain how to unlock for that session, including a password-locked profile, instead of pointing to the terminal session (#111).
 - `login` asks "Stay logged in?" only when someone can answer: not with `--credential-process`, and not when stdin or stderr isn't a terminal. In those cases a profile without `remember_me` signs in without remembering the session and no answer is saved; `--remember-me` and a stored value still apply (#52).
+- A crash while awzars is encrypting or decrypting the saved browser session no longer leaves the process hanging. The crash handler skips wiping the in-memory cookie keys when they are in use, instead of waiting for them (#100).
 
 ## [1.0.5] - 2026-10-26
 
