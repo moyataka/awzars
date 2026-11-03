@@ -3,6 +3,7 @@
 use awzars::cli::{Args, Command};
 use awzars::error::AwzarsError;
 use clap::Parser;
+use std::io::IsTerminal;
 use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
 
@@ -51,7 +52,15 @@ async fn run(args: Args) -> awzars::error::Result<()> {
             awzars::cli::commands::credential_process::execute(&args).await
         }
         Command::ClearCache { yes } => {
+            awzars::config::Config::load()?.get_profile(&args.profile)?;
             if !*yes {
+                if !std::io::stdin().is_terminal() {
+                    return Err(AwzarsError::Dialog(
+                        "can't ask for confirmation because stdin is not a terminal; \
+                         pass --yes to clear without asking"
+                            .into(),
+                    ));
+                }
                 let prompt = format!(
                     "Clear cached credentials for profile '{}'? Next AWS call will sign in again (silently if the browser session is remembered).",
                     args.profile
