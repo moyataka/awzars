@@ -48,6 +48,7 @@ struct KeyStoreJson {
 
 /// In-memory keystore. `Zeroizing<[u8; 32]>` ensures key material is wiped
 /// when the entry is dropped (eviction, replacement, or process cleanup).
+#[derive(Clone)]
 struct CachedStore {
     current: NonZeroU8,
     keys: BTreeMap<u8, Zeroizing<[u8; 32]>>,
@@ -331,7 +332,7 @@ pub fn encrypt(profile: &str, json: &[u8]) -> Result<Vec<u8>> {
 
     // Load (cache or keyring), rotate if stale, persist + cache the result.
     let (key_id, key_bytes) = {
-        let mut store = match cache_lookup(profile) {
+        let store = match cache_lookup(profile) {
             Some(_) => {
                 // Take a mutable copy out of the cache (we may rotate). If the
                 // entry vanished between the lookup and the take, fall through
@@ -348,10 +349,23 @@ pub fn encrypt(profile: &str, json: &[u8]) -> Result<Vec<u8>> {
             None => load_or_init_store(profile)?,
         };
 
-        let rotated = rotate_if_needed(&mut store)?;
-        if rotated {
-            save_keystore(&keyring, &store)?;
+        // Rotate a copy. If rotating or saving fails, the store taken out
+        // above goes back into the cache unchanged: the next call does not
+        // read the keychain again, and a key that was never saved is never
+        // used.
+        let mut rotated_store = store.clone();
+        let result = rotate_if_needed(&mut rotated_store).and_then(|rotated| {
+            if rotated {
+                save_keystore(&keyring, &rotated_store)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(e) = result {
+            cache_replace(profile, store);
+            return Err(e);
         }
+        let store = rotated_store;
 
         let key = store.keys.get(&store.current.get()).ok_or_else(|| {
             AwzarsError::Storage("Current cookie key missing from keystore".into())
@@ -761,6 +775,58 @@ mod tests {
             let reloaded = load_or_init_from_entry(&entry, now).unwrap();
             assert_eq!(*reloaded.keys[&1], *original.keys[&1]);
         }
+    }
+
+    /// A one-key store whose key is past the rotation window, so the next
+    /// encrypt rotates it.
+    fn stale_store(current: u8) -> CachedStore {
+        let mut keys = BTreeMap::new();
+        keys.insert(current, Zeroizing::new([current; 32]));
+        let mut created_at = BTreeMap::new();
+        created_at.insert(current, now_unix_secs() - ROTATION_INTERVAL_SECS - 100);
+        CachedStore {
+            current: nz(current),
+            keys,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn encrypt_keeps_cached_keystore_when_rotation_fails() {
+        crate::storage::keyring::test_keychain::install();
+        let profile = "cookie-rotation-fails";
+        // Key id 255 can't rotate: the id space is exhausted.
+        cache_replace(profile, stale_store(255));
+
+        assert!(encrypt(profile, b"{}").is_err());
+
+        assert_eq!(
+            cache_lookup(profile),
+            Some((255, [255u8; 32])),
+            "a failed rotation must leave the keystore in the cache"
+        );
+    }
+
+    #[test]
+    fn encrypt_keeps_saved_keystore_when_saving_rotation_fails() {
+        crate::storage::keyring::test_keychain::install();
+        let profile = "cookie-rotation-save-fails";
+        let entry = KeyringStorage::new(profile)
+            .unwrap()
+            .entry_for_field("cookie_key")
+            .unwrap();
+        save_keystore_to_entry(&entry, &stale_store(1)).unwrap();
+        let saved = entry.get_password().unwrap();
+        cache_replace(profile, stale_store(1));
+
+        crate::storage::keyring::test_keychain::fail_writes(true);
+        let result = encrypt(profile, b"{}");
+        crate::storage::keyring::test_keychain::fail_writes(false);
+        assert!(result.is_err());
+
+        assert_eq!(entry.get_password().unwrap(), saved);
+        // The cache keeps the saved key 1, not the unsaved rotated key 2.
+        assert_eq!(cache_lookup(profile), Some((1, [1u8; 32])));
     }
 
     #[test]
