@@ -32,11 +32,17 @@ pub async fn execute(args: &Args) -> Result<()> {
 
     // Start browser automation.
     tracing::info!("Fetching SAML assertion to list roles");
-    let remember_me = profile.remember_me.unwrap_or(false);
     let has_remote = std::env::var("CHROME_REMOTE_URL").is_ok();
-    let (headless, no_sandbox) = browser_options(&args.profile, profile, has_remote);
-    let mut browser =
-        AzureLoginBrowser::new(headless, no_sandbox, remember_me, &args.profile, false).await?;
+    let (headless, no_sandbox, persistent_profile) =
+        browser_options(&args.profile, profile, has_remote);
+    let mut browser = AzureLoginBrowser::new(
+        headless,
+        no_sandbox,
+        persistent_profile,
+        &args.profile,
+        false,
+    )
+    .await?;
     browser.set_quiet(args.quiet);
 
     // Perform login and get SAML assertion, then close the browser before
@@ -103,24 +109,30 @@ pub async fn execute(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Headless and no-sandbox settings for the list-roles browser.
+/// Headless, no-sandbox and persistent-profile settings for the list-roles
+/// browser.
 ///
 /// Headless only when a session can be reused: a remote Chrome, a saved
 /// cookie store, or a persistent Chrome profile with `remember_me`.
 /// Otherwise a visible browser opens so the user can sign in. `no_sandbox`
-/// comes from the profile.
+/// comes from the profile. The user-data-dir follows `login`: a saved
+/// cookie store goes into a temporary profile, not the persistent one.
 fn browser_options(
     profile_name: &str,
     profile: &crate::config::Profile,
     has_remote: bool,
-) -> (bool, bool) {
+) -> (bool, bool, bool) {
     let remember_me = profile.remember_me.unwrap_or(false);
     let has_cookie_store = AzureLoginBrowser::has_cookie_store(profile_name);
     let chromium_dir_exists = crate::config::chromium_data_dir(profile_name)
         .map(|p| p.exists())
         .unwrap_or(false);
     let headless = has_remote || has_cookie_store || (remember_me && chromium_dir_exists);
-    (headless, profile.no_sandbox.unwrap_or(false))
+    (
+        headless,
+        profile.no_sandbox.unwrap_or(false),
+        crate::cli::commands::login::use_persistent_profile(has_cookie_store, remember_me),
+    )
 }
 
 /// A local headless sign-in (not a remote Chrome) that times out usually
@@ -182,28 +194,93 @@ mod tests {
         profile.no_sandbox = Some(true);
 
         // No saved session: a visible browser, so the user can sign in.
-        assert_eq!(browser_options("default", &profile, false), (false, true));
+        assert_eq!(
+            browser_options("default", &profile, false),
+            (false, true, false)
+        );
         // A remote Chrome stays headless.
-        assert_eq!(browser_options("default", &profile, true), (true, true));
+        assert_eq!(
+            browser_options("default", &profile, true),
+            (true, true, false)
+        );
 
         // A persistent Chrome profile is reused headless only with
         // remember_me, and remember_me alone needs that profile to exist.
         profile.remember_me = Some(true);
-        assert_eq!(browser_options("default", &profile, false), (false, true));
+        assert_eq!(
+            browser_options("default", &profile, false),
+            (false, true, true)
+        );
         let store = crate::config::chromium_data_dir("default")
             .unwrap()
             .join("cookies.enc");
         std::fs::create_dir_all(store.parent().unwrap()).unwrap();
-        assert_eq!(browser_options("default", &profile, false), (true, true));
+        assert_eq!(
+            browser_options("default", &profile, false),
+            (true, true, true)
+        );
         profile.remember_me = None;
-        assert_eq!(browser_options("default", &profile, false), (false, true));
+        assert_eq!(
+            browser_options("default", &profile, false),
+            (false, true, false)
+        );
 
         // A cookie store from an earlier remembered sign-in: headless.
         std::fs::write(&store, b"").unwrap();
-        assert_eq!(browser_options("default", &profile, false), (true, true));
+        assert_eq!(
+            browser_options("default", &profile, false),
+            (true, true, false)
+        );
 
         profile.no_sandbox = None;
-        assert_eq!(browser_options("default", &profile, false), (true, false));
+        assert_eq!(
+            browser_options("default", &profile, false),
+            (true, false, false)
+        );
+    }
+
+    #[test]
+    fn browser_options_use_a_temporary_profile_when_a_cookie_store_exists() {
+        const DIRECTORY: &str = "AWZARS_LIST_ROLES_PERSISTENT_PROFILE_DIRECTORY";
+        let Ok(directory) = std::env::var(DIRECTORY) else {
+            // Runs in a child so the config directory override stays out of
+            // this process.
+            let directory = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::commands::list_roles::tests::browser_options_use_a_temporary_profile_when_a_cookie_store_exists",
+                ])
+                .env(DIRECTORY, directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        crate::config::set_config_dir_override(&directory).unwrap();
+        let mut profile = crate::config::Profile::new(crate::config::AzureConfig::new(
+            "11111111-2222-3333-4444-aaaaaaaaaaaa",
+            "https://signin.aws.amazon.com/saml",
+        ));
+        profile.remember_me = Some(true);
+
+        // remember_me without a cookie store: the persistent profile.
+        assert!(browser_options("default", &profile, false).2);
+
+        // With a cookie store, as in `login`: a temporary profile, so another
+        // Chrome holding the persistent one can't block the launch.
+        let store = crate::config::chromium_data_dir("default")
+            .unwrap()
+            .join("cookies.enc");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(&store, b"").unwrap();
+        assert!(!browser_options("default", &profile, false).2);
     }
 
     #[test]
