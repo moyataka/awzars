@@ -103,6 +103,7 @@ async fn refresh_credentials(
     // Credentials expired or missing — auto-login
     tracing::info!("No reusable AWS credentials found; attempting automatic re-authentication");
     profile.validate_app_id_uri(profile_name)?;
+    profile.validate_role_arn(profile_name)?;
 
     let role_arn = profile.role_arn.clone().ok_or_else(|| {
         AwzarsError::Config(format!(
@@ -219,5 +220,25 @@ mod tests {
         };
         assert!(message.contains("'app-id-uri-check'"), "{message}");
         assert!(message.contains("app_id_uri"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_stored_role_arn_outside_the_aws_partition() {
+        for partition in ["aws-cn", "aws-us-gov"] {
+            let mut profile = Profile::new(crate::config::AzureConfig::new(
+                "11111111-2222-3333-4444-aaaaaaaaaaaa",
+                "https://signin.aws.amazon.com/saml",
+            ));
+            profile.role_arn = Some(format!("arn:{partition}:iam::123456789012:role/Example"));
+            let error = refresh_credentials("role-arn-check", &profile, true, false, false, false)
+                .await
+                .unwrap_err();
+            let AwzarsError::Config(message) = &error else {
+                panic!("expected a config error, got {error:?}");
+            };
+            assert!(message.contains("'role-arn-check'"), "{message}");
+            assert!(message.contains("role_arn"), "{message}");
+            assert!(message.contains("only the `aws` partition"), "{message}");
+        }
     }
 }

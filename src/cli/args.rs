@@ -336,16 +336,21 @@ pub fn parse_session_duration(s: &str) -> Result<i32, String> {
     Ok(v)
 }
 
-/// Validate an IAM role ARN in the AWS, China, or GovCloud partition.
+/// Validate an IAM role ARN in the `aws` partition.
 pub fn parse_role_arn(s: &str) -> Result<String, String> {
     use crate::auth::aws::arn::{IamArn, IamResource};
-    IamArn::parse(s)
+    let arn = IamArn::parse(s)
         .filter(|arn| arn.resource() == IamResource::Role)
-        .map(|arn| arn.as_str().to_string())
         .ok_or_else(|| {
-            "invalid IAM role ARN (expected arn:<partition>:iam::<12-digit-account>:role/<name>)"
+            "invalid IAM role ARN (expected arn:aws:iam::<12-digit-account>:role/<name>)"
                 .to_string()
-        })
+        })?;
+    if !arn.is_supported_partition() {
+        return Err(
+            "only the `aws` partition is supported (aws-cn and aws-us-gov are not)".to_string(),
+        );
+    }
+    Ok(arn.as_str().to_string())
 }
 
 /// AWS profile names are restricted to a safe alphanumeric subset.

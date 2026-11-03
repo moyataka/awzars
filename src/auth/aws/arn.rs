@@ -44,4 +44,11 @@ impl<'a> IamArn<'a> {
     pub fn as_str(self) -> &'a str {
         self.value
     }
+
+    /// Sign-in always targets the commercial AWS endpoint, so only the
+    /// `aws` partition is usable; `aws-cn` and `aws-us-gov` are recognised
+    /// only so they can be rejected with a clear message.
+    pub fn is_supported_partition(self) -> bool {
+        self.value.starts_with("arn:aws:")
+    }
 }

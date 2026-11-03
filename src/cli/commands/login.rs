@@ -590,6 +590,9 @@ pub async fn execute(args: &Args) -> Result<()> {
     if login_args.azure_app.is_none() {
         profile.validate_app_id_uri(&args.profile)?;
     }
+    if login_args.role_arn.is_none() {
+        profile.validate_role_arn(&args.profile)?;
+    }
     let tenant_id = login_args
         .azure_tenant
         .as_ref()
@@ -1049,6 +1052,75 @@ mod tests {
             let output = command.output().unwrap();
             assert!(
                 output.status.success(),
+                "override: {overridden}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_role_arn_outside_the_aws_partition_is_checked_unless_overridden() {
+        use clap::Parser;
+        if let Ok(directory) = std::env::var("AWZARS_LOGIN_ROLE_ARN_DIRECTORY") {
+            config::set_config_dir_override(&directory).unwrap();
+            let mut profile = crate::config::Profile::new(crate::config::AzureConfig::new(
+                "11111111-2222-3333-4444-aaaaaaaaaaaa",
+                "https://signin.aws.amazon.com/saml",
+            ));
+            profile.role_arn = Some("arn:aws-cn:iam::123456789012:role/Example".to_string());
+            profile.lock_ai_markers = Some(vec![]);
+            profile.remember_me = Some(false);
+            let mut config = Config::default();
+            config.set_profile("default", profile);
+            config.save().unwrap();
+            let mut arguments = vec!["awzars", "login"];
+            let overridden = std::env::var("AWZARS_LOGIN_ROLE_ARN_OVERRIDE").is_ok();
+            if overridden {
+                arguments.extend(["--role-arn", "arn:aws:iam::123456789012:role/Example"]);
+            }
+            let error = execute(&Args::try_parse_from(arguments).unwrap())
+                .await
+                .unwrap_err();
+            // With the override, sign-in goes on to the browser, which
+            // refuses the `ws://` remote URL.
+            match (&error, overridden) {
+                (AwzarsError::Config(message), false) => {
+                    assert!(message.contains("role_arn"), "{message}");
+                    assert!(message.contains("only the `aws` partition"), "{message}");
+                }
+                (AwzarsError::Browser(_), true) => {}
+                _ => panic!("unexpected error (override: {overridden}): {error:?}"),
+            }
+            return;
+        }
+        // The child runs `execute`. A `ws://` remote URL without
+        // `--allow-insecure-remote-chrome` is refused before connecting, so
+        // no case can open Chrome.
+        for overridden in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            // Re-runs this test binary itself, not an external program.
+            let test_binary = std::env::current_exe().unwrap(); // nosemgrep: rust.lang.security.current-exe.current-exe
+            let mut command = std::process::Command::new(test_binary);
+            command
+                .args([
+                    "--exact",
+                    "cli::commands::login::tests::stored_role_arn_outside_the_aws_partition_is_checked_unless_overridden",
+                    "--nocapture",
+                ])
+                .env("AWZARS_LOGIN_ROLE_ARN_DIRECTORY", directory.path())
+                .env("CHROME_REMOTE_URL", "ws://127.0.0.1:9/devtools/browser/test")
+                .env_remove("AWZARS_AZURE_TENANT_ID")
+                .env_remove("AWZARS_AZURE_APP_ID_URI");
+            if overridden {
+                command.env("AWZARS_LOGIN_ROLE_ARN_OVERRIDE", "1");
+            } else {
+                command.env_remove("AWZARS_LOGIN_ROLE_ARN_OVERRIDE");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
                 "override: {overridden}: {} {}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)

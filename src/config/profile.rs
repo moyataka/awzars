@@ -101,6 +101,23 @@ impl Profile {
                 ))
             })
     }
+
+    /// Check a stored `role_arn` before it is used for a browser sign-in, so
+    /// a hand-edited value outside the `aws` partition fails before sign-in.
+    pub fn validate_role_arn(&self, profile_name: &str) -> Result<()> {
+        let Some(role_arn) = &self.role_arn else {
+            return Ok(());
+        };
+        crate::cli::args::parse_role_arn(role_arn)
+            .map(|_| ())
+            .map_err(|e| {
+                AwzarsError::Config(format!(
+                    "profile '{p}': role_arn in config.toml is not valid: {e}. \
+                     Fix it with `awzars configure --profile {p}`.",
+                    p = profile_name,
+                ))
+            })
+    }
 }
 
 /// Maximum size of `config.toml` in bytes. A genuine config holding many
@@ -241,6 +258,24 @@ mod tests {
                     .is_ok(),
                 "{uri}"
             );
+        }
+    }
+
+    #[test]
+    fn validate_role_arn_rejects_other_partitions() {
+        let mut profile = profile_with_app_id_uri("https://signin.aws.amazon.com/saml");
+        assert!(profile.validate_role_arn("work").is_ok());
+        profile.role_arn = Some("arn:aws:iam::123456789012:role/Role".to_string());
+        assert!(profile.validate_role_arn("work").is_ok());
+        for partition in ["aws-cn", "aws-us-gov"] {
+            profile.role_arn = Some(format!("arn:{partition}:iam::123456789012:role/Role"));
+            let error = profile.validate_role_arn("work").unwrap_err();
+            let AwzarsError::Config(message) = &error else {
+                panic!("expected a config error, got {error:?}");
+            };
+            assert!(message.contains("profile 'work'"), "{message}");
+            assert!(message.contains("role_arn"), "{message}");
+            assert!(message.contains("only the `aws` partition"), "{message}");
         }
     }
 

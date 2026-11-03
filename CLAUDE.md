@@ -110,7 +110,7 @@ src/
 │   │   ├── saml.rs              # SAML assertion parsing, validation, role extraction
 │   │   └── protocol.rs          # Pure SAML-build/extract/AWS-redirect helpers (no chromium dep)
 │   ├── aws/
-│   │   ├── arn.rs               # IAM ARN parsing (role / SAML provider; aws, aws-cn, aws-us-gov partitions)
+│   │   ├── arn.rs               # IAM ARN parsing (role / SAML provider); only the `aws` partition is supported
 │   │   └── sts.rs               # STS AssumeRoleWithSAML
 │   ├── credentials/
 │   │   ├── pipeline.rs          # try_load_credentials: cache → keyring fallback (single source of truth)
