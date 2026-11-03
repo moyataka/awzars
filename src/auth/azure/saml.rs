@@ -319,15 +319,24 @@ fn extract_conditions(assertion: Node) -> Result<SamlConditions> {
             continue;
         }
 
+        // A present but unparsable timestamp is rejected, not treated as absent.
         if let Some(nb) = node.attribute("NotBefore") {
-            out.not_before = DateTime::parse_from_rfc3339(nb)
-                .map(|dt| dt.with_timezone(&Utc))
-                .ok();
+            out.not_before = Some(
+                DateTime::parse_from_rfc3339(nb)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|_| {
+                        AwzarsError::Saml("SAML NotBefore is not a valid timestamp".to_string())
+                    })?,
+            );
         }
         if let Some(na) = node.attribute("NotOnOrAfter") {
-            out.not_on_or_after = DateTime::parse_from_rfc3339(na)
-                .map(|dt| dt.with_timezone(&Utc))
-                .ok();
+            out.not_on_or_after = Some(
+                DateTime::parse_from_rfc3339(na)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|_| {
+                        AwzarsError::Saml("SAML NotOnOrAfter is not a valid timestamp".to_string())
+                    })?,
+            );
         }
 
         for restriction in node.children() {
@@ -590,6 +599,31 @@ mod tests {
         );
         let err = SamlAssertion::parse(&encode(&xml), TENANT_ID, AUDIENCE).unwrap_err();
         assert!(matches!(err, AwzarsError::Saml(ref m) if m.contains("not yet valid")));
+    }
+
+    #[test]
+    fn test_parse_rejects_unparsable_time_window() {
+        let nb = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        let na = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let issuer = format!("https://sts.windows.net/{}/", TENANT_ID);
+        for (not_before, not_on_or_after, attribute) in [
+            ("not-a-timestamp", na.as_str(), "NotBefore"),
+            (nb.as_str(), "not-a-timestamp", "NotOnOrAfter"),
+        ] {
+            let xml = build_assertion_xml(&issuer, AUDIENCE, not_before, not_on_or_after);
+            let err = SamlAssertion::parse(&encode(&xml), TENANT_ID, AUDIENCE).unwrap_err();
+            assert!(
+                matches!(err, AwzarsError::Saml(ref m)
+                    if m.contains(attribute) && !m.contains("not-a-timestamp")),
+                "{err}"
+            );
+        }
+
+        // Absent attributes are still accepted.
+        let xml = build_assertion_xml(&issuer, AUDIENCE, "", "")
+            .replace(r#" NotBefore="" NotOnOrAfter="""#, "");
+        let assertion = SamlAssertion::parse(&encode(&xml), TENANT_ID, AUDIENCE).unwrap();
+        assert!(assertion.expiration().is_none());
     }
 
     #[test]

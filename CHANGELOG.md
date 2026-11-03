@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `getrandom` is now 0.4, the version `tempfile` and `uuid` already use. The cookie key and nonce come from `getrandom::fill`, its new name for the same call (#82).
 
 ### Fixed
+- A `config.toml` that can't be parsed now makes every command exit with code 2 (config error), as the README documents, instead of 1 (#97).
 - AWS CLI credential-process errors identify OS keyring access failures, explain that credential expiration could not be checked, and point to unlocking the keyring after a reboot before retrying the original command.
 - Headless login skips the local browser-session warning when remote Chrome or saved cookies provide the session. Remote Chrome documentation includes the macOS launch command and separate permissions needed by AWS CLI refreshes.
 - Unit tests always use an in-memory keychain, so `cargo test` never creates, reads or deletes entries in the developer's OS keychain, whatever the test order (#68).
@@ -35,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The "AI context detected" and "password-locked" errors, and the AI consent prompts, now name the session the unlock applies to. Inside Claude Code they explain how to unlock for that session, including a password-locked profile, instead of pointing to the terminal session (#111).
 - `login` asks "Stay logged in?" only when someone can answer: not with `--credential-process`, and not when stdin or stderr isn't a terminal. In those cases a profile without `remember_me` signs in without remembering the session and no answer is saved; `--remember-me` and a stored value still apply (#52).
 - A crash while awzars is encrypting or decrypting the saved browser session no longer leaves the process hanging. The crash handler skips wiping the in-memory cookie keys when they are in use, instead of waiting for them (#100).
+- A SAML assertion whose `NotBefore` or `NotOnOrAfter` time can't be read is now rejected, instead of being accepted as if that time limit were not set (#102).
 
 ## [1.0.5] - 2026-10-26
 
