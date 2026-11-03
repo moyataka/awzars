@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A crash while awzars is encrypting or decrypting the saved browser session no longer leaves the process hanging. The crash handler skips wiping the in-memory cookie keys when they are in use, instead of waiting for them (#100).
 - A SAML assertion whose `NotBefore` or `NotOnOrAfter` time can't be read is now rejected, instead of being accepted as if that time limit were not set (#102).
 - `configure --non-interactive` no longer creates a profile with an empty tenant ID and app ID URI. Creating a profile now needs `--azure-tenant` and `--azure-app` (or their `AWZARS_*` environment variables); without them it exits with code 2, names the missing flags and writes nothing. Updating an existing profile still keeps stored values for flags that are not passed (#121).
+- When saving the browser session's cookies fails, for example because the keychain refuses to store a rotated cookie key, awzars keeps the saved keys in memory instead of dropping them, so the next cookie read or write in the same run does not read them from the keychain again. A new key that could not be saved is not used (#95).
 
 ## [1.0.5] - 2026-10-26
 
