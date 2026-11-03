@@ -46,7 +46,7 @@ pub async fn execute(args: &Args) -> Result<()> {
         .await;
     browser.shutdown().await;
     let saml_response = saml_result
-        .map_err(|e| explain_headless_timeout(e, headless && !has_remote, &args.profile))?;
+        .map_err(|e| explain_headless_timeout(e, headless, has_remote, &args.profile))?;
 
     // Parse and validate SAML assertion
     let assertion = SamlAssertion::parse(
@@ -123,16 +123,17 @@ fn browser_options(
     (headless, profile.no_sandbox.unwrap_or(false))
 }
 
-/// A local headless sign-in that times out usually means the saved browser
-/// session has expired. Say how to sign in again.
+/// A local headless sign-in (not a remote Chrome) that times out usually
+/// means the saved browser session has expired. Say how to sign in again.
 fn explain_headless_timeout(
     error: AwzarsError,
-    local_headless: bool,
+    headless: bool,
+    has_remote: bool,
     profile: &str,
 ) -> AwzarsError {
     match error {
         AwzarsError::Browser(message)
-            if local_headless && message == "Authentication timed out" =>
+            if headless && !has_remote && message == "Authentication timed out" =>
         {
             AwzarsError::Browser(format!(
                 "Authentication timed out. The saved browser session for profile '{p}' \
@@ -185,11 +186,19 @@ mod tests {
         // A remote Chrome stays headless.
         assert_eq!(browser_options("default", &profile, true), (true, true));
 
-        // A cookie store from an earlier remembered sign-in: headless.
+        // A persistent Chrome profile is reused headless only with
+        // remember_me, and remember_me alone needs that profile to exist.
+        profile.remember_me = Some(true);
+        assert_eq!(browser_options("default", &profile, false), (false, true));
         let store = crate::config::chromium_data_dir("default")
             .unwrap()
             .join("cookies.enc");
         std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        assert_eq!(browser_options("default", &profile, false), (true, true));
+        profile.remember_me = None;
+        assert_eq!(browser_options("default", &profile, false), (false, true));
+
+        // A cookie store from an earlier remembered sign-in: headless.
         std::fs::write(&store, b"").unwrap();
         assert_eq!(browser_options("default", &profile, false), (true, true));
 
@@ -200,7 +209,8 @@ mod tests {
     #[test]
     fn local_headless_timeout_points_to_login() {
         let timeout = || AwzarsError::Browser("Authentication timed out".to_string());
-        let AwzarsError::Browser(message) = explain_headless_timeout(timeout(), true, "work")
+        let AwzarsError::Browser(message) =
+            explain_headless_timeout(timeout(), true, false, "work")
         else {
             panic!("expected a browser error");
         };
@@ -211,8 +221,14 @@ mod tests {
 
         // A visible or remote browser, and other errors, are left as they are.
         for error in [
-            explain_headless_timeout(timeout(), false, "work"),
-            explain_headless_timeout(AwzarsError::Browser("other".to_string()), true, "work"),
+            explain_headless_timeout(timeout(), false, false, "work"),
+            explain_headless_timeout(timeout(), true, true, "work"),
+            explain_headless_timeout(
+                AwzarsError::Browser("other".to_string()),
+                true,
+                false,
+                "work",
+            ),
         ] {
             let AwzarsError::Browser(message) = error else {
                 panic!("expected a browser error");
