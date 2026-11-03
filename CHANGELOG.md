@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `login` asks "Stay logged in?" only when someone can answer: not with `--credential-process`, and not when stdin or stderr isn't a terminal. In those cases a profile without `remember_me` signs in without remembering the session and no answer is saved; `--remember-me` and a stored value still apply (#52).
 - A crash while awzars is encrypting or decrypting the saved browser session no longer leaves the process hanging. The crash handler skips wiping the in-memory cookie keys when they are in use, instead of waiting for them (#100).
 - A SAML assertion whose `NotBefore` or `NotOnOrAfter` time can't be read is now rejected, instead of being accepted as if that time limit were not set (#102).
+- When saving the browser session's cookies fails, for example because the keychain refuses to store a rotated cookie key, awzars keeps the saved keys in memory instead of dropping them, so the next cookie read or write in the same run does not read them from the keychain again. A new key that could not be saved is not used (#95).
 
 ## [1.0.5] - 2026-10-26
 

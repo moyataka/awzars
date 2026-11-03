@@ -156,7 +156,7 @@ pub(crate) mod test_keychain {
 
     use keyring::credential::CredentialApi;
     use keyring::Entry;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -164,11 +164,18 @@ pub(crate) mod test_keychain {
 
     thread_local! {
         static ITEMS: RefCell<Option<HashMap<String, Slot>>> = const { RefCell::new(None) };
+        static FAIL_WRITES: Cell<bool> = const { Cell::new(false) };
     }
 
     /// Route this thread's `KeyringStorage` entries to a fresh, empty store.
     pub(crate) fn install() {
         ITEMS.with(|items| *items.borrow_mut() = Some(HashMap::new()));
+        FAIL_WRITES.with(|fail| fail.set(false));
+    }
+
+    /// Make every write on this thread fail (`true`) or succeed again.
+    pub(crate) fn fail_writes(on: bool) {
+        FAIL_WRITES.with(|fail| fail.set(on));
     }
 
     /// The entry for `service`/`user` in this thread's store, created empty
@@ -189,6 +196,9 @@ pub(crate) mod test_keychain {
 
     impl CredentialApi for SharedCredential {
         fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+            if FAIL_WRITES.with(Cell::get) {
+                return Err(keyring::Error::PlatformFailure("write refused".into()));
+            }
             *self.0.lock().unwrap() = Some(secret.to_vec());
             Ok(())
         }
