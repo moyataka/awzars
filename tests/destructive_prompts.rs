@@ -1,5 +1,5 @@
 //! `clear-cache` and `delete-profile` refuse to prompt without a terminal and
-//! point to `--yes`, and `clear-cache` refuses a profile that doesn't exist.
+//! point to `--yes`, and refuse a profile that doesn't exist before asking.
 //! Every case here stops before any keychain access.
 #![cfg(unix)]
 
@@ -66,6 +66,18 @@ fn clear_cache_without_a_terminal_points_to_yes() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(6), "{stderr}");
     assert!(stderr.contains("pass --yes"), "{stderr}");
+}
+
+#[test]
+fn delete_profile_reports_a_missing_profile_before_asking() {
+    let directory = config_dir_with_dev_profile();
+    let output = awzars(directory.path(), &["--profile", "absent", "delete-profile"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("Profile 'absent' not found"), "{stderr}");
+    assert!(output.stdout.is_empty());
+    let config = std::fs::read_to_string(directory.path().join("config.toml")).unwrap();
+    assert_eq!(config, CONFIG, "the config must not change");
 }
 
 #[test]

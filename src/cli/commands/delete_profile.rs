@@ -8,6 +8,8 @@ use crate::error::{AwzarsError, Result};
 use std::io::IsTerminal;
 
 pub fn run(profile: &str, yes: bool, quiet: bool) -> Result<()> {
+    // Say that the profile doesn't exist before asking to delete it.
+    crate::config::Config::load()?.get_profile(profile)?;
     if !yes {
         if !std::io::stdin().is_terminal() {
             return Err(AwzarsError::Dialog(
