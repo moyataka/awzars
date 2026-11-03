@@ -4,7 +4,7 @@ use crate::auth::azure::saml::SamlAssertion;
 use crate::browser::chromium::AzureLoginBrowser;
 use crate::cli::args::{Args, OutputFormat};
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{AwzarsError, Result};
 
 /// Execute the list-roles command
 pub async fn execute(args: &Args) -> Result<()> {
@@ -31,20 +31,12 @@ pub async fn execute(args: &Args) -> Result<()> {
     profile.validate_app_id_uri(&args.profile)?;
 
     // Start browser automation.
-    // Pre-flight: pick headless only when a session exists (cookie store or
-    // persistent Chrome user-data-dir), otherwise launch a visible browser so
-    // the user can actually authenticate. Skip the check if CHROME_REMOTE_URL
-    // is set — the remote Chrome may already have a live session.
     tracing::info!("Fetching SAML assertion to list roles");
     let remember_me = profile.remember_me.unwrap_or(false);
     let has_remote = std::env::var("CHROME_REMOTE_URL").is_ok();
-    let has_cookie_store = AzureLoginBrowser::has_cookie_store(&args.profile);
-    let chromium_dir_exists = crate::config::chromium_data_dir(&args.profile)
-        .map(|p| p.exists())
-        .unwrap_or(false);
-    let headless = has_remote || has_cookie_store || (remember_me && chromium_dir_exists);
+    let (headless, no_sandbox) = browser_options(&args.profile, profile, has_remote);
     let mut browser =
-        AzureLoginBrowser::new(headless, false, remember_me, &args.profile, false).await?;
+        AzureLoginBrowser::new(headless, no_sandbox, remember_me, &args.profile, false).await?;
     browser.set_quiet(args.quiet);
 
     // Perform login and get SAML assertion, then close the browser before
@@ -53,7 +45,8 @@ pub async fn execute(args: &Args) -> Result<()> {
         .login_and_get_saml(&profile.azure.tenant_id, &profile.azure.app_id_uri)
         .await;
     browser.shutdown().await;
-    let saml_response = saml_result?;
+    let saml_response = saml_result
+        .map_err(|e| explain_headless_timeout(e, headless, has_remote, &args.profile))?;
 
     // Parse and validate SAML assertion
     let assertion = SamlAssertion::parse(
@@ -110,9 +103,139 @@ pub async fn execute(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// Headless and no-sandbox settings for the list-roles browser.
+///
+/// Headless only when a session can be reused: a remote Chrome, a saved
+/// cookie store, or a persistent Chrome profile with `remember_me`.
+/// Otherwise a visible browser opens so the user can sign in. `no_sandbox`
+/// comes from the profile.
+fn browser_options(
+    profile_name: &str,
+    profile: &crate::config::Profile,
+    has_remote: bool,
+) -> (bool, bool) {
+    let remember_me = profile.remember_me.unwrap_or(false);
+    let has_cookie_store = AzureLoginBrowser::has_cookie_store(profile_name);
+    let chromium_dir_exists = crate::config::chromium_data_dir(profile_name)
+        .map(|p| p.exists())
+        .unwrap_or(false);
+    let headless = has_remote || has_cookie_store || (remember_me && chromium_dir_exists);
+    (headless, profile.no_sandbox.unwrap_or(false))
+}
+
+/// A local headless sign-in (not a remote Chrome) that times out usually
+/// means the saved browser session has expired. Say how to sign in again.
+fn explain_headless_timeout(
+    error: AwzarsError,
+    headless: bool,
+    has_remote: bool,
+    profile: &str,
+) -> AwzarsError {
+    match error {
+        AwzarsError::Browser(message)
+            if headless && !has_remote && message == "Authentication timed out" =>
+        {
+            AwzarsError::Browser(format!(
+                "Authentication timed out. The saved browser session for profile '{p}' \
+                 may have expired: run `awzars login --profile {p}` to sign in again, \
+                 then run list-roles again.",
+                p = profile
+            ))
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_options_keep_the_headless_rule_and_use_profile_no_sandbox() {
+        const DIRECTORY: &str = "AWZARS_LIST_ROLES_BROWSER_OPTIONS_DIRECTORY";
+        let Ok(directory) = std::env::var(DIRECTORY) else {
+            // Runs in a child so the config directory override stays out of
+            // this process.
+            let directory = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::commands::list_roles::tests::browser_options_keep_the_headless_rule_and_use_profile_no_sandbox",
+                ])
+                .env(DIRECTORY, directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        crate::config::set_config_dir_override(&directory).unwrap();
+        let mut profile = crate::config::Profile::new(crate::config::AzureConfig::new(
+            "11111111-2222-3333-4444-aaaaaaaaaaaa",
+            "https://signin.aws.amazon.com/saml",
+        ));
+        profile.no_sandbox = Some(true);
+
+        // No saved session: a visible browser, so the user can sign in.
+        assert_eq!(browser_options("default", &profile, false), (false, true));
+        // A remote Chrome stays headless.
+        assert_eq!(browser_options("default", &profile, true), (true, true));
+
+        // A persistent Chrome profile is reused headless only with
+        // remember_me, and remember_me alone needs that profile to exist.
+        profile.remember_me = Some(true);
+        assert_eq!(browser_options("default", &profile, false), (false, true));
+        let store = crate::config::chromium_data_dir("default")
+            .unwrap()
+            .join("cookies.enc");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        assert_eq!(browser_options("default", &profile, false), (true, true));
+        profile.remember_me = None;
+        assert_eq!(browser_options("default", &profile, false), (false, true));
+
+        // A cookie store from an earlier remembered sign-in: headless.
+        std::fs::write(&store, b"").unwrap();
+        assert_eq!(browser_options("default", &profile, false), (true, true));
+
+        profile.no_sandbox = None;
+        assert_eq!(browser_options("default", &profile, false), (true, false));
+    }
+
+    #[test]
+    fn local_headless_timeout_points_to_login() {
+        let timeout = || AwzarsError::Browser("Authentication timed out".to_string());
+        let AwzarsError::Browser(message) =
+            explain_headless_timeout(timeout(), true, false, "work")
+        else {
+            panic!("expected a browser error");
+        };
+        assert!(
+            message.contains("`awzars login --profile work`"),
+            "{message}"
+        );
+
+        // A visible or remote browser, and other errors, are left as they are.
+        for error in [
+            explain_headless_timeout(timeout(), false, false, "work"),
+            explain_headless_timeout(timeout(), true, true, "work"),
+            explain_headless_timeout(
+                AwzarsError::Browser("other".to_string()),
+                true,
+                false,
+                "work",
+            ),
+        ] {
+            let AwzarsError::Browser(message) = error else {
+                panic!("expected a browser error");
+            };
+            assert!(!message.contains("awzars login"), "{message}");
+        }
+    }
 
     #[tokio::test]
     async fn invalid_stored_app_id_uri_is_a_config_error() {
