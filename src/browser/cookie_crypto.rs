@@ -931,37 +931,55 @@ mod tests {
 
     #[test]
     fn concurrent_encrypts_read_the_keychain_once() {
-        let profile = "cookie-concurrent-encrypts";
-        let loads = std::sync::atomic::AtomicUsize::new(0);
-        let (reading_tx, reading_rx) = std::sync::mpsc::channel();
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
 
-        let (first, second) = std::thread::scope(|s| {
-            let first = s.spawn(|| {
-                encrypt_with_loader(profile, b"{}", |_| {
-                    loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    reading_tx.send(()).unwrap();
-                    // A slow keychain read, such as one waiting on a prompt.
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    Ok(fresh_store(1))
-                })
+        const PROFILE: &str = "cookie-concurrent-encrypts";
+        // Detached threads and bounded waits: a regression that never reads
+        // the keychain, or that blocks, fails the test instead of hanging it.
+        const WAIT: Duration = Duration::from_secs(10);
+        let loads = Arc::new(AtomicUsize::new(0));
+        let (reading_tx, reading_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let first_loads = Arc::clone(&loads);
+        let first_done = done_tx.clone();
+        std::thread::spawn(move || {
+            let result = encrypt_with_loader(PROFILE, b"{}", |_| {
+                first_loads.fetch_add(1, Ordering::SeqCst);
+                let _ = reading_tx.send(());
+                // A slow keychain read, such as one waiting on a prompt.
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(fresh_store(1))
             });
-            reading_rx.recv().unwrap();
-            let second = s.spawn(|| {
-                encrypt_with_loader(profile, b"{}", |_| {
-                    loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok(fresh_store(2))
-                })
+            let _ = first_done.send(result);
+        });
+        reading_rx
+            .recv_timeout(WAIT)
+            .expect("the first encrypt never read the keychain");
+
+        let second_loads = Arc::clone(&loads);
+        std::thread::spawn(move || {
+            let result = encrypt_with_loader(PROFILE, b"{}", |_| {
+                second_loads.fetch_add(1, Ordering::SeqCst);
+                Ok(fresh_store(2))
             });
-            (first.join().unwrap(), second.join().unwrap())
+            let _ = done_tx.send(result);
         });
 
+        for _ in 0..2 {
+            let data = done_rx
+                .recv_timeout(WAIT)
+                .expect("an encrypt did not finish")
+                .unwrap();
+            assert_eq!(data[0], 1, "both encrypts must use the first store");
+        }
         assert_eq!(
-            loads.load(std::sync::atomic::Ordering::SeqCst),
+            loads.load(Ordering::SeqCst),
             1,
             "the second encrypt must use the first one's store"
         );
-        assert_eq!(first.unwrap()[0], 1);
-        assert_eq!(second.unwrap()[0], 1);
     }
 
     #[test]
