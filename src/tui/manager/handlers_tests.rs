@@ -493,3 +493,54 @@ fn failed_reload_after_delete_does_not_bring_the_profile_back() {
     assert!(!saved.profiles.contains_key("deleted-profile"));
     assert_eq!(saved.profiles["kept"].region.as_deref(), Some("eu-west-1"));
 }
+
+#[test]
+fn delete_keeps_the_profile_when_keychain_items_cannot_be_removed() {
+    use crate::storage::keyring::{test_keychain, KeyringStorage};
+    const TEST_DIRECTORY: &str = "AWZARS_TUI_DELETE_KEYRING_FAILURE_TEST";
+    let Ok(directory) = std::env::var(TEST_DIRECTORY) else {
+        return run_in_child(
+            "delete_keeps_the_profile_when_keychain_items_cannot_be_removed",
+            TEST_DIRECTORY,
+        );
+    };
+    crate::config::set_config_dir_override(&directory).unwrap();
+    test_keychain::install();
+    let mut config = tui_config(&directory);
+    config.set_profile("kept", tui_profile());
+    config.save().unwrap();
+    let path = crate::config::config_file().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let entry = KeyringStorage::new("kept")
+        .unwrap()
+        .entry_for_field("cookie_key")
+        .unwrap();
+    entry.set_password("stored").unwrap();
+    let mut manager = ConfigManager::new(Config::load().unwrap()).unwrap();
+
+    test_keychain::fail_deletes(true);
+    manager.mode = Mode::DeleteConfirm {
+        target: "kept".into(),
+        is_awzars: true,
+    };
+    manager.handle_delete_confirm(KeyCode::Char('y')).unwrap();
+    test_keychain::fail_deletes(false);
+
+    let (level, message) = manager.status.clone().unwrap();
+    assert_eq!(level, StatusLevel::Error);
+    assert!(message.contains("profile 'kept' was kept"), "{message}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(manager.config.profiles.contains_key("kept"));
+    assert!(manager.profile_names.contains(&"kept".to_string()));
+    assert!(entry.get_password().is_ok());
+
+    // Deleting again retries and now succeeds.
+    manager.mode = Mode::DeleteConfirm {
+        target: "kept".into(),
+        is_awzars: true,
+    };
+    manager.handle_delete_confirm(KeyCode::Char('y')).unwrap();
+    assert_eq!(manager.status.as_ref().unwrap().0, StatusLevel::Success);
+    assert!(!Config::load().unwrap().profiles.contains_key("kept"));
+    assert!(!manager.profile_names.contains(&"kept".to_string()));
+}

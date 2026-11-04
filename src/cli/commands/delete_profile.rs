@@ -55,13 +55,6 @@ pub fn run(profile: &str, yes: bool, quiet: bool) -> Result<()> {
         eprintln!("Edit your configured AWS file to remove or repoint them.");
     }
 
-    if let Some(reason) = report.keyring_error {
-        return Err(AwzarsError::Keyring(format!(
-            "profile '{}' is deleted, but {}",
-            profile, reason
-        )));
-    }
-
     Ok(())
 }
 
@@ -72,7 +65,7 @@ mod tests {
     use crate::storage::keyring::{test_keychain, KeyringStorage};
 
     #[test]
-    fn delete_reports_keychain_items_it_could_not_remove() {
+    fn delete_keeps_the_profile_when_keychain_items_cannot_be_removed() {
         const TEST_DIRECTORY: &str = "AWZARS_DELETE_PROFILE_KEYRING_TEST";
         let Ok(directory) = std::env::var(TEST_DIRECTORY) else {
             // The config directory override is process-wide, so the test
@@ -81,7 +74,7 @@ mod tests {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "cli::commands::delete_profile::tests::delete_reports_keychain_items_it_could_not_remove",
+                    "cli::commands::delete_profile::tests::delete_keeps_the_profile_when_keychain_items_cannot_be_removed",
                 ])
                 .env(TEST_DIRECTORY, directory.path())
                 .output()
@@ -122,12 +115,19 @@ mod tests {
         let error = result.expect_err("a keychain failure must not report success");
         assert!(matches!(error, AwzarsError::Keyring(_)), "{error}");
         let message = error.to_string();
-        assert!(message.contains("profile 'gone' is deleted"), "{message}");
+        assert!(message.contains("profile 'gone' was kept"), "{message}");
+        assert!(message.contains("Run the delete again"), "{message}");
         assert!(message.contains("gone:cookie_key ("), "{message}");
         assert!(
             entry.get_password().is_ok(),
             "the cookie key is still stored"
         );
+        // The profile is still there, so the delete can be run again.
+        assert!(Config::load().unwrap().profiles.contains_key("gone"));
+
+        // The retry removes the keychain items and then the profile.
+        run("gone", true, true).unwrap();
+        assert!(entry.get_password().is_err(), "the cookie key is removed");
         assert!(!Config::load().unwrap().profiles.contains_key("gone"));
     }
 }

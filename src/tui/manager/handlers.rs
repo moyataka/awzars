@@ -589,10 +589,7 @@ impl ConfigManager {
                             self.awzars_list_state.select(Some(self.awzars_selected));
 
                             let orphans = report.orphaned_aws_profiles;
-                            let mut warnings = report.warnings;
-                            if let Some(reason) = report.keyring_error {
-                                warnings.insert(0, format!("keyring: {}", reason));
-                            }
+                            let warnings = report.warnings;
 
                             if !warnings.is_empty() {
                                 let mut msg = format!(
