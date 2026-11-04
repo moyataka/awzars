@@ -19,22 +19,34 @@ pub struct ProfileDeletionReport {
     /// Names of `~/.aws/config` profiles whose `credential_process` still
     /// references the deleted awzars profile. Read-only — never modified.
     pub orphaned_aws_profiles: Vec<String>,
-    /// Non-fatal cleanup failures (chromium dir removal, keyring delete).
+    /// Non-fatal cleanup failures (chromium dir removal, cache, tokens).
     pub warnings: Vec<String>,
 }
 
 /// Delete an awzars profile and clean up all owned state.
 ///
-/// Errors only when the profile does not exist or the config file cannot be
-/// rewritten. Filesystem and keyring failures during cleanup are recorded as
-/// warnings — the config entry is the source of truth for "does this profile
-/// exist", and once that is gone the rest is best-effort cleanup.
+/// The config entry is the source of truth for "does this profile exist",
+/// so it is removed last. The keychain items go first: if any of them can't
+/// be removed, the profile is kept and the error says so, so running the
+/// delete again retries. Chromium dir, cache and token failures after that
+/// are recorded as warnings.
 pub fn delete_awzars_profile(name: &str) -> Result<ProfileDeletionReport> {
-    let mut config = super::Config::load()?;
-    if config.remove_profile(name).is_none() {
-        return Err(AwzarsError::ProfileNotFound(name.to_string()));
+    super::Config::load()?.get_profile(name)?;
+
+    // Full keyring wipe (includes `cookie_key`), unlike the edit-time
+    // invalidation which preserves the cookie key.
+    if let Err(e) = crate::storage::keyring::KeyringStorage::new(name)
+        .and_then(|keyring| keyring.delete_credentials())
+    {
+        let reason = match e {
+            AwzarsError::Keyring(reason) => reason,
+            e => e.to_string(),
+        };
+        return Err(AwzarsError::Keyring(format!(
+            "profile '{}' was kept because {}. Run the delete again to retry.",
+            name, reason
+        )));
     }
-    config.save()?;
 
     let mut warnings = Vec::new();
 
@@ -48,17 +60,6 @@ pub fn delete_awzars_profile(name: &str) -> Result<ProfileDeletionReport> {
         Err(e) => warnings.push(format!("chromium dir: {}", e)),
     }
 
-    // Full keyring wipe (includes `cookie_key`), unlike the edit-time
-    // invalidation which preserves the cookie key.
-    match crate::storage::keyring::KeyringStorage::new(name) {
-        Ok(keyring) => {
-            if let Err(e) = keyring.delete_credentials() {
-                warnings.push(format!("keyring: {}", e));
-            }
-        }
-        Err(e) => warnings.push(format!("keyring: {}", e)),
-    }
-
     if let Err(e) = crate::storage::cache::clear_profile_cache(name) {
         warnings.push(format!("cache: {}", e));
     }
@@ -69,6 +70,13 @@ pub fn delete_awzars_profile(name: &str) -> Result<ProfileDeletionReport> {
     // password lock stays bound to that lock's verifier even if left behind.
     if let Err(e) = crate::auth::lock::revoke_all_unlocks(name) {
         warnings.push(format!("session unlock tokens: {}", e));
+    }
+
+    // Load the config again right before removing the entry, so changes
+    // made to it while the cleanup ran are kept.
+    let mut config = super::Config::load()?;
+    if config.remove_profile(name).is_some() {
+        config.save()?;
     }
 
     let orphaned_aws_profiles = linked_aws_profiles(&config, name);

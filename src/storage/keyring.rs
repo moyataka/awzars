@@ -94,11 +94,7 @@ impl KeyringStorage {
             "cookie_key",
         ];
 
-        for key in keys {
-            if let Ok(entry) = self.entry_for_field(key) {
-                let _ = entry.delete_credential();
-            }
-        }
+        self.delete_fields(&keys)?;
 
         tracing::info!(
             "Credentials deleted from keychain for profile: {}",
@@ -122,12 +118,37 @@ impl KeyringStorage {
             "expiration",
         ];
 
+        self.delete_fields(&keys)
+    }
+
+    /// Delete the entry of every field in `keys`. An entry that does not
+    /// exist counts as deleted. Every field is tried even after one fails;
+    /// the error then names each entry that could not be removed.
+    fn delete_fields(&self, keys: &[&str]) -> Result<()> {
+        let mut failures = Vec::new();
         for key in keys {
-            if let Ok(entry) = self.entry_for_field(key) {
-                let _ = entry.delete_credential();
+            let failure = match self.entry_for_field(key) {
+                Ok(entry) => match entry.delete_credential() {
+                    Ok(()) | Err(keyring::Error::NoEntry) => None,
+                    Err(e) => Some(e.to_string()),
+                },
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(reason) = failure {
+                failures.push(format!("{}:{} ({})", self.profile, key, reason));
             }
         }
-        Ok(())
+        if failures.is_empty() {
+            return Ok(());
+        }
+        let items = if failures.len() == 1 { "item" } else { "items" };
+        Err(AwzarsError::Keyring(format!(
+            "{} keychain {} could not be removed (service '{}'): {}",
+            failures.len(),
+            items,
+            self.service_name,
+            failures.join(", ")
+        )))
     }
 
     /// Create a keyring entry for a key
@@ -212,6 +233,9 @@ pub(crate) mod test_keychain {
         }
 
         fn delete_credential(&self) -> keyring::Result<()> {
+            if FAIL_DELETES.with(|fail| fail.get()) {
+                return Err(keyring::Error::NoStorageAccess("keychain locked".into()));
+            }
             self.0
                 .lock()
                 .unwrap()
@@ -223,6 +247,15 @@ pub(crate) mod test_keychain {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+    }
+
+    thread_local! {
+        static FAIL_DELETES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Make every delete on this test thread fail (`true`) or work again.
+    pub(crate) fn fail_deletes(on: bool) {
+        FAIL_DELETES.with(|fail| fail.set(on));
     }
 }
 
@@ -448,6 +481,75 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    const ALL_FIELDS: [&str; 6] = [
+        "credentials",
+        "access_key_id",
+        "secret_access_key",
+        "session_token",
+        "expiration",
+        "cookie_key",
+    ];
+
+    fn store_fields(storage: &KeyringStorage, fields: &[&str]) {
+        for field in fields {
+            let entry = storage.entry_for_field(field).unwrap();
+            entry.set_password("stored").unwrap();
+        }
+    }
+
+    fn is_stored(storage: &KeyringStorage, field: &str) -> bool {
+        let entry = storage.entry_for_field(field).unwrap();
+        entry.get_password().is_ok()
+    }
+
+    #[test]
+    fn deleting_missing_entries_succeeds() {
+        test_keychain::install();
+        let storage = KeyringStorage::new("delete-missing").unwrap();
+        assert!(storage.delete_session_credentials().is_ok());
+        assert!(storage.delete_credentials().is_ok());
+    }
+
+    #[test]
+    fn delete_credentials_reports_every_entry_it_could_not_remove() {
+        test_keychain::install();
+        let storage = KeyringStorage::new("delete-refused").unwrap();
+        store_fields(&storage, &ALL_FIELDS);
+
+        test_keychain::fail_deletes(true);
+        let result = storage.delete_credentials();
+        test_keychain::fail_deletes(false);
+
+        let message = result.expect_err("a refused delete must fail").to_string();
+        assert!(message.contains("6 keychain items"), "{message}");
+        for field in ALL_FIELDS {
+            assert!(
+                message.contains(&format!("delete-refused:{field} (")),
+                "{message}"
+            );
+            assert!(is_stored(&storage, field));
+        }
+    }
+
+    #[test]
+    fn delete_session_credentials_reports_failure_and_keeps_cookie_key() {
+        test_keychain::install();
+        let storage = KeyringStorage::new("delete-session-refused").unwrap();
+        store_fields(&storage, &["credentials", "cookie_key"]);
+
+        test_keychain::fail_deletes(true);
+        let result = storage.delete_session_credentials();
+        test_keychain::fail_deletes(false);
+
+        let message = result.expect_err("a refused delete must fail").to_string();
+        assert!(message.contains("5 keychain items"), "{message}");
+        assert!(!message.contains("cookie_key"), "{message}");
+
+        storage.delete_session_credentials().unwrap();
+        assert!(!is_stored(&storage, "credentials"));
+        assert!(is_stored(&storage, "cookie_key"));
     }
 
     #[test]
