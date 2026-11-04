@@ -59,6 +59,12 @@ struct CachedStore {
 /// macOS, repeated Keychain dialogs) within a single login flow.
 static STORE_CACHE: Mutex<Option<HashMap<String, CachedStore>>> = Mutex::new(None);
 
+/// Makes `encrypt` calls take turns loading, rotating and saving a keystore,
+/// so two threads never load, create or rotate the same one at once.
+/// `STORE_CACHE` is never held across a keychain read (which can wait on a
+/// macOS prompt), so `decrypt` and `cleanup_keys` don't wait behind one.
+static KEYSTORE_LOCK: Mutex<()> = Mutex::new(());
+
 fn now_unix_secs() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -277,6 +283,7 @@ fn rotate_if_needed(store: &mut CachedStore) -> Result<bool> {
     Ok(true)
 }
 
+#[cfg(test)]
 fn cache_lookup(profile: &str) -> Option<(u8, [u8; 32])> {
     let guard = STORE_CACHE.lock().ok()?;
     let map = guard.as_ref()?;
@@ -290,6 +297,18 @@ fn cache_lookup_specific(profile: &str, id: u8) -> Option<[u8; 32]> {
     let map = guard.as_ref()?;
     let store = map.get(profile)?;
     store.keys.get(&id).map(|k| **k)
+}
+
+/// Take the profile's store out of the cache if it holds its current key.
+/// `STORE_CACHE` is held only for the take.
+fn cache_take(profile: &str) -> Option<CachedStore> {
+    let mut guard = STORE_CACHE.lock().ok()?;
+    let map = guard.as_mut()?;
+    let store = map.get(profile)?;
+    if !store.keys.contains_key(&store.current.get()) {
+        return None;
+    }
+    map.remove(profile)
 }
 
 fn cache_replace(profile: &str, store: CachedStore) {
@@ -328,25 +347,31 @@ fn wipe_cache(cache: &Mutex<Option<HashMap<String, CachedStore>>>) {
 ///
 /// Format: `[1 byte key_id][12 byte nonce][ciphertext + 16 byte tag]`.
 pub fn encrypt(profile: &str, json: &[u8]) -> Result<Vec<u8>> {
+    encrypt_with_loader(profile, json, load_or_init_store)
+}
+
+/// `encrypt`, with the keychain load passed in so tests can replace it.
+fn encrypt_with_loader(
+    profile: &str,
+    json: &[u8],
+    load: impl Fn(&str) -> Result<CachedStore>,
+) -> Result<Vec<u8>> {
     let keyring = KeyringStorage::new(profile)?;
 
     // Load (cache or keyring), rotate if stale, persist + cache the result.
     let (key_id, key_bytes) = {
-        let store = match cache_lookup(profile) {
-            Some(_) => {
-                // Take a mutable copy out of the cache (we may rotate). If the
-                // entry vanished between the lookup and the take, fall through
-                // to a fresh keyring load.
-                let mut guard = STORE_CACHE
-                    .lock()
-                    .map_err(|_| AwzarsError::Storage("Cookie keystore cache poisoned".into()))?;
-                let map = guard.get_or_insert_with(HashMap::new);
-                match map.remove(profile) {
-                    Some(s) => s,
-                    None => load_or_init_store(profile)?,
-                }
+        // Held until the store is back in the cache. The lock guards no
+        // data, so a poisoned one is still usable.
+        let _turn = KEYSTORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Take the store out of the cache (we may rotate). Without one, read
+        // the keychain with STORE_CACHE unlocked, then check the cache again:
+        // a store that `decrypt` cached meanwhile wins over the one read here.
+        let store = match cache_take(profile) {
+            Some(s) => s,
+            None => {
+                let loaded = load(profile)?;
+                cache_take(profile).unwrap_or(loaded)
             }
-            None => load_or_init_store(profile)?,
         };
 
         // Rotate a copy. If rotating or saving fails, the store taken out
@@ -857,6 +882,103 @@ mod tests {
             cache_lookup_specific(profile, 2),
             Some([2u8; 32]),
             "the loaded keystore must be cached"
+        );
+    }
+
+    /// A one-key store with key `[id; 32]`, too new to rotate.
+    fn fresh_store(id: u8) -> CachedStore {
+        let mut keys = BTreeMap::new();
+        keys.insert(id, Zeroizing::new([id; 32]));
+        let mut created_at = BTreeMap::new();
+        created_at.insert(id, now_unix_secs());
+        CachedStore {
+            current: nz(id),
+            keys,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn encrypt_loads_without_the_cache_lock_and_keeps_a_store_cached_meanwhile() {
+        crate::storage::keyring::test_keychain::install();
+        let profile = "cookie-load-unlocked";
+        let cache_was_locked = std::cell::Cell::new(None);
+
+        let data = encrypt_with_loader(profile, b"{}", |_| {
+            // Stands in for a decrypt that caches the store while this
+            // thread reads the keychain. That needs STORE_CACHE unlocked.
+            match STORE_CACHE.try_lock() {
+                Ok(mut guard) => {
+                    guard
+                        .get_or_insert_with(HashMap::new)
+                        .insert(profile.to_string(), fresh_store(7));
+                    cache_was_locked.set(Some(false));
+                }
+                Err(_) => cache_was_locked.set(Some(true)),
+            }
+            Ok(fresh_store(1))
+        })
+        .unwrap();
+
+        assert_eq!(
+            cache_was_locked.get(),
+            Some(false),
+            "STORE_CACHE must not be held while the keychain is read"
+        );
+        assert_eq!(data[0], 7, "the store cached meanwhile must be used");
+        assert_eq!(cache_lookup(profile), Some((7, [7u8; 32])));
+    }
+
+    #[test]
+    fn concurrent_encrypts_read_the_keychain_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+
+        const PROFILE: &str = "cookie-concurrent-encrypts";
+        // Detached threads and bounded waits: a regression that never reads
+        // the keychain, or that blocks, fails the test instead of hanging it.
+        const WAIT: Duration = Duration::from_secs(10);
+        let loads = Arc::new(AtomicUsize::new(0));
+        let (reading_tx, reading_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let first_loads = Arc::clone(&loads);
+        let first_done = done_tx.clone();
+        std::thread::spawn(move || {
+            let result = encrypt_with_loader(PROFILE, b"{}", |_| {
+                first_loads.fetch_add(1, Ordering::SeqCst);
+                let _ = reading_tx.send(());
+                // A slow keychain read, such as one waiting on a prompt.
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(fresh_store(1))
+            });
+            let _ = first_done.send(result);
+        });
+        reading_rx
+            .recv_timeout(WAIT)
+            .expect("the first encrypt never read the keychain");
+
+        let second_loads = Arc::clone(&loads);
+        std::thread::spawn(move || {
+            let result = encrypt_with_loader(PROFILE, b"{}", |_| {
+                second_loads.fetch_add(1, Ordering::SeqCst);
+                Ok(fresh_store(2))
+            });
+            let _ = done_tx.send(result);
+        });
+
+        for _ in 0..2 {
+            let data = done_rx
+                .recv_timeout(WAIT)
+                .expect("an encrypt did not finish")
+                .unwrap();
+            assert_eq!(data[0], 1, "both encrypts must use the first store");
+        }
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            1,
+            "the second encrypt must use the first one's store"
         );
     }
 
