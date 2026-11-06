@@ -1,6 +1,6 @@
 use crate::error::{AwzarsError, Result};
 use nix::sys::select::{select, FdSet, FD_SETSIZE};
-use nix::sys::termios::{self, LocalFlags, SetArg, Termios};
+use nix::sys::termios::{self, FlushArg, LocalFlags, SetArg, Termios};
 use nix::sys::time::{TimeVal, TimeValLike};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -14,7 +14,9 @@ struct TerminalEchoGuard {
 
 impl Drop for TerminalEchoGuard {
     fn drop(&mut self) {
-        let _ = termios::tcsetattr(&self.terminal, SetArg::TCSAFLUSH, &self.original);
+        // TCSAFLUSH can wait indefinitely for unread terminal output on macOS.
+        let _ = termios::tcflush(&self.terminal, FlushArg::TCIFLUSH);
+        let _ = termios::tcsetattr(&self.terminal, SetArg::TCSANOW, &self.original);
     }
 }
 
@@ -109,6 +111,7 @@ mod tests {
         }
         for mode in ["password", "interrupt", "terminate"] {
             let terminal = nix::pty::openpty(None, None).unwrap();
+            // Leave output unread: restoring echo must not wait for it to drain.
             let mut master = File::from(terminal.master);
             let slave = File::from(terminal.slave);
             let original = termios::tcgetattr(&slave).unwrap();
