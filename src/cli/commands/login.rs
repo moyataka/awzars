@@ -116,7 +116,8 @@ async fn sign_in(params: &LoginParams) -> Result<SamlSignIn> {
     // Extract SAML then close the browser immediately — avoids spurious CDP
     // warnings and prevents the AWS role-selection page from appearing live
     // alongside the terminal TUI selector.
-    let saml_result = authenticate(&mut browser, params).await;
+    let saml_result =
+        crate::util::interrupt::until_interrupted(authenticate(&mut browser, params)).await;
     browser.shutdown().await;
     let response = saml_result?;
 
@@ -547,7 +548,15 @@ pub(super) fn persist_credentials(
     identity: &str,
 ) -> Result<()> {
     CacheHandle::new(profile)?.store(credentials, identity)?;
-    KeyringStorage::new(profile)?.store_credentials(credentials, identity)?;
+    if KeyringStorage::new(profile)?
+        .store_credentials(credentials, identity)
+        .is_err()
+    {
+        tracing::warn!(
+            "Sign-in succeeded, but the OS keyring could not save the credentials. \
+             Returning them for this request; the next process may need to sign in again."
+        );
+    }
     Ok(())
 }
 
@@ -909,6 +918,27 @@ fn mask_secret(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issued_credentials_survive_a_keychain_write_failure() {
+        crate::storage::keyring::test_keychain::install();
+        let credentials = credentials("issued-before-storage-failure");
+        crate::storage::keyring::test_keychain::fail_writes(true);
+        persist_credentials(&credentials, "failed-keychain-write", "identity").unwrap();
+        crate::storage::keyring::test_keychain::fail_writes(false);
+        let cached = crate::auth::credentials::try_load_credentials(
+            "failed-keychain-write",
+            "identity",
+            3600,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(cached.access_key_id, credentials.access_key_id);
+        let output = serde_json::to_value(&cached).unwrap();
+        assert_eq!(output["Version"], 1);
+        assert_eq!(output["AccessKeyId"], credentials.access_key_id);
+    }
 
     #[tokio::test]
     async fn quiet_login_suppresses_human_output_but_keeps_json() {

@@ -71,6 +71,8 @@ credential_process = /usr/local/bin/awzars credential-process --profile work
 - **Defaults to headless + remember-me**: When credentials expire, it automatically attempts silent headless re-authentication using saved browser cookies (no config needed)
 - **Pre-flight check**: Before launching a browser, verifies a session exists. Returns a clear error if no prior `awzars login --remember-me` session is found
 - **Skips check for remote Chrome**: When `CHROME_REMOTE_URL` is set, connects to remote Chrome directly (no local session needed)
+- **Explicitly disabled persistence**: local headless refresh with `remember_me = false` fails before launching Chrome. Visible and remote browsers remain supported.
+- **Keychain write failure after sign-in**: returns the issued credentials with a warning; failure to save does not discard them.
 
 ```bash
 # First time: establish a persistent session
@@ -116,6 +118,7 @@ src/
 │   │   ├── pipeline.rs          # try_load_credentials: cache → keyring fallback (single source of truth)
 │   │   └── refresh_lock.rs      # Per-profile cross-process refresh lock (<config-dir>/refresh-<profile>.lock, 60 s wait bound)
 │   └── lock.rs                  # Per-profile password lock + AI consent gate (Argon2id; session-scoped tokens bound to lock verifier + boot)
+│       # password_prompt.rs owns /dev/tty echo restoration and zeroized input
 ├── storage/
 │   ├── cache.rs                 # In-memory credential cache (per-profile)
 │   └── keyring.rs               # OS keychain integration (single JSON entry per profile)
@@ -140,6 +143,7 @@ src/
 └── util/
     ├── atomic_write.rs          # unlink → O_EXCL|O_NOFOLLOW open → fchmod → rename, used by all on-disk persistence
     └── perms.rs                 # enforce_perms_no_symlink: symlink-safe chmod helper
+    # interrupt.rs defers SIGINT/SIGTERM while browser/terminal cleanup is needed
 ```
 
 The `manager/` directory is a single Rust module split across three files: each
@@ -429,7 +433,7 @@ awzars login --allow-insecure-remote-chrome
 2. Navigate to Azure AD login URL (tenant_id validated as UUID)
 3. User authenticates (MFA supported)
 4. Capture the SAMLResponse from the browser's HTTPS POST to an AWS sign-in host's `/saml` endpoint (`browser/saml_capture.rs`), before the AWS console receives it
-5. **Shut down the browser** before any further processing: a graceful CDP close for a Chrome that awzars launched; with `CHROME_REMOTE_URL`, close only the page awzars opened and disconnect, leaving the remote Chrome running. This avoids spurious chromiumoxide WARN messages and prevents the AWS role-selection page from appearing live alongside the terminal TUI selector.
+5. **Shut down the browser** before any further processing, including on SIGINT/SIGTERM: clear temporary-session cookies, close and wait for owned Chrome (bounded kill fallback), then remove its temporary profile. With `CHROME_REMOTE_URL`, close only the page awzars opened and disconnect, leaving the remote Chrome running. SIGKILL and crashes cannot run cleanup. Interactive `list-roles` retries a timed-out local headless sign-in once visibly.
 6. Parse roles from assertion, validate issuer/audience/recipient/time-window
 7. Call STS AssumeRoleWithSAML (region resolved as profile `region` → AWS default chain → `us-east-1` fallback)
-8. Cache credentials in memory and store in keychain
+8. Cache credentials in memory and try to store in the keychain; a keychain write failure warns but still returns the newly issued credentials.

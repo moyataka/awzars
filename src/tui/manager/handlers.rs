@@ -237,6 +237,8 @@ impl ConfigManager {
                     .cloned();
 
                 if let Some(ref prev) = prev_profile {
+                    profile.extra = prev.extra.clone();
+                    profile.azure.extra = prev.azure.extra.clone();
                     profile.lock_verifier = prev.lock_verifier.clone();
                     profile.lock_ttl_hours = prev.lock_ttl_hours;
                     profile.lock_ai_markers = prev.lock_ai_markers.clone();

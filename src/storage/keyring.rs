@@ -128,7 +128,7 @@ impl KeyringStorage {
         let mut failures = Vec::new();
         for key in keys {
             let failure = match self.entry_for_field(key) {
-                Ok(entry) => match entry.delete_credential() {
+                Ok(entry) => match delete_entry(&entry, cfg!(target_os = "macos")) {
                     Ok(()) | Err(keyring::Error::NoEntry) => None,
                     Err(e) => Some(e.to_string()),
                 },
@@ -167,6 +167,26 @@ impl KeyringStorage {
     }
 }
 
+fn delete_entry(entry: &Entry, verify: bool) -> keyring::Result<()> {
+    match entry.delete_credential() {
+        Ok(()) => {}
+        Err(keyring::Error::NoEntry) => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    if verify {
+        match entry.get_secret().map(Zeroizing::new) {
+            Err(keyring::Error::NoEntry) => {}
+            Err(error) => return Err(error),
+            Ok(_) => {
+                return Err(keyring::Error::PlatformFailure(
+                    "keychain item still exists after deletion".into(),
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod test_keychain {
     //! An in-memory keychain for the current test thread. In test builds
@@ -186,17 +206,24 @@ pub(crate) mod test_keychain {
     thread_local! {
         static ITEMS: RefCell<Option<HashMap<String, Slot>>> = const { RefCell::new(None) };
         static FAIL_WRITES: Cell<bool> = const { Cell::new(false) };
+        static IGNORE_DELETES: Cell<bool> = const { Cell::new(false) };
     }
 
     /// Route this thread's `KeyringStorage` entries to a fresh, empty store.
     pub(crate) fn install() {
         ITEMS.with(|items| *items.borrow_mut() = Some(HashMap::new()));
         FAIL_WRITES.with(|fail| fail.set(false));
+        IGNORE_DELETES.with(|ignore| ignore.set(false));
+        FAIL_DELETES.with(|fail| fail.set(false));
     }
 
     /// Make every write on this thread fail (`true`) or succeed again.
     pub(crate) fn fail_writes(on: bool) {
         FAIL_WRITES.with(|fail| fail.set(on));
+    }
+
+    pub(super) fn ignore_deletes(on: bool) {
+        IGNORE_DELETES.with(|ignore| ignore.set(on));
     }
 
     /// The entry for `service`/`user` in this thread's store, created empty
@@ -233,6 +260,9 @@ pub(crate) mod test_keychain {
         }
 
         fn delete_credential(&self) -> keyring::Result<()> {
+            if IGNORE_DELETES.with(Cell::get) {
+                return Ok(());
+            }
             if FAIL_DELETES.with(|fail| fail.get()) {
                 return Err(keyring::Error::NoStorageAccess("keychain locked".into()));
             }
@@ -343,6 +373,24 @@ fn credentials_from_entry(entry: &Entry, identity: &str) -> Result<Option<Creden
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_verification_detects_silently_retained_items() {
+        test_keychain::install();
+        let entry = KeyringStorage::new("delete-verification")
+            .unwrap()
+            .entry_for_field("credentials")
+            .unwrap();
+        entry.set_secret(b"test-only-secret").unwrap();
+        test_keychain::ignore_deletes(true);
+        let error = delete_entry(&entry, true).unwrap_err();
+        assert!(error.to_string().contains("still exists"));
+        assert!(!error.to_string().contains("test-only-secret"));
+        test_keychain::ignore_deletes(false);
+        delete_entry(&entry, true).unwrap();
+        delete_entry(&entry, true).unwrap();
+        assert!(matches!(entry.get_secret(), Err(keyring::Error::NoEntry)));
+    }
     use keyring::mock::MockCredential;
 
     fn mock_entry() -> Entry {

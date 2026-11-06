@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 /// Azure AD configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AzureConfig {
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, toml::Value>,
     /// Azure AD tenant ID
     pub tenant_id: String,
 
@@ -28,6 +30,7 @@ impl Default for AzureConfig {
     fn default() -> Self {
         Self {
             tenant_id: String::new(),
+            extra: Default::default(),
             app_id_uri: String::new(),
             default_role_arn: None,
             session_duration: 3600,
@@ -40,6 +43,7 @@ impl AzureConfig {
     pub fn new(tenant_id: impl Into<String>, app_id_uri: impl Into<String>) -> Self {
         Self {
             tenant_id: tenant_id.into(),
+            extra: Default::default(),
             app_id_uri: app_id_uri.into(),
             default_role_arn: None,
             session_duration: 3600,

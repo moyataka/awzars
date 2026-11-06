@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `getrandom` is now 0.4, the version `tempfile` and `uuid` already use. The cookie key and nonce come from `getrandom::fill`, its new name for the same call (#82).
 
 ### Fixed
+- Interrupted local sign-ins close Chrome and remove its temporary profile on SIGINT/SIGTERM, clearing temporary-session cookies before shutdown. Remote Chrome remains open (#114).
+- Password entry through `/dev/tty` restores terminal echo on interruption and keeps its input in memory buffers that are wiped on drop (#101).
+- Cookie encryption keys and serialized/decrypted cookie JSON stay in buffers that are wiped on drop (#103).
+- A delayed cookie read no longer replaces a newer cached keystore after concurrent key rotation (#153).
+- macOS keychain deletion is verified by reading the item back, so a silently failed platform deletion is reported (#154).
+- Successful sign-in still returns its credentials when the keychain refuses to save them, with a warning that later processes may need to sign in again (#93).
+- Configuration saves preserve unknown settings at the top level, in profiles and in Azure settings, including edits through `configure` and the TUI (#99).
+- Local headless `credential-process` refresh rejects `remember_me = false` before launching Chrome, explaining how to enable a saved session or a visible browser (#98).
+- A cancelled non-SAML browser request no longer aborts capture of the sign-in assertion (#110).
+- Interactive `list-roles` retries an expired headless session once in a visible browser and saves the renewed session when remembering is enabled (#96).
 - A `config.toml` that can't be parsed now makes every command exit with code 2 (config error), as the README documents, instead of 1 (#97).
 - AWS CLI credential-process errors identify OS keyring access failures, explain that credential expiration could not be checked, and point to unlocking the keyring after a reboot before retrying the original command.
 - Headless login skips the local browser-session warning when remote Chrome or saved cookies provide the session. Remote Chrome documentation includes the macOS launch command and separate permissions needed by AWS CLI refreshes.

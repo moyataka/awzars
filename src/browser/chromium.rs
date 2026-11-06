@@ -224,14 +224,14 @@ pub struct AzureLoginBrowser {
     headless: bool,
     remember_me: bool,
     is_remote: bool,
-    /// CDP event loop for a remote Chrome. Aborted on shutdown to drop the
-    /// connection; it does not end on its own while the browser stays open.
-    remote_handler: Option<tokio::task::JoinHandle<()>>,
+    /// CDP event loop; aborted after closing the owned browser or page.
+    handler_task: Option<tokio::task::JoinHandle<()>>,
+    interruption_guard: Option<crate::util::interrupt::InterruptionGuard>,
     quiet: bool,
     profile: String,
     /// Ephemeral directory for non-remember-me sessions. Held so that it is
     /// cleaned up (deleted) when this struct is dropped after the browser exits.
-    _ephemeral_dir: Option<tempfile::TempDir>,
+    ephemeral_directory: Option<tempfile::TempDir>,
 }
 
 impl AzureLoginBrowser {
@@ -249,6 +249,7 @@ impl AzureLoginBrowser {
         profile: &str,
         allow_insecure_remote_chrome: bool,
     ) -> Result<Self> {
+        crate::util::interrupt::check()?;
         // Check for remote Chrome URL.
         //
         // SECURITY: When CHROME_REMOTE_URL is explicitly set, the user has chosen
@@ -280,6 +281,7 @@ impl AzureLoginBrowser {
         remember_me: bool,
         profile: &str,
     ) -> Result<Self> {
+        let interruption_guard = crate::util::interrupt::protect_cleanup()?;
         let parsed = validate_ws_url(ws_url, allow_insecure)?;
 
         tracing::warn!(
@@ -305,7 +307,7 @@ impl AzureLoginBrowser {
             .map_err(|e| AwzarsError::Browser(format!("Failed to connect to remote Chrome: {}. Verify CHROME_REMOTE_URL points to a running Chrome DevTools endpoint.", e)))?;
 
         // Spawn handler task
-        let remote_handler = tokio::spawn(async move {
+        let handler_task = tokio::spawn(async move {
             while let Some(event) = handler.next().await {
                 if event.is_err() {
                     tracing::trace!("Browser handler event: {:?}", event);
@@ -319,10 +321,11 @@ impl AzureLoginBrowser {
             headless,
             remember_me,
             is_remote: true,
-            remote_handler: Some(remote_handler),
+            handler_task: Some(handler_task),
+            interruption_guard: Some(interruption_guard),
             quiet: false,
             profile: profile.to_string(),
-            _ephemeral_dir: None,
+            ephemeral_directory: None,
         })
     }
 
@@ -333,6 +336,7 @@ impl AzureLoginBrowser {
         remember_me: bool,
         profile: &str,
     ) -> Result<Self> {
+        let interruption_guard = crate::util::interrupt::protect_cleanup()?;
         let mut config_builder = BrowserConfig::builder().request_timeout(Duration::from_secs(120));
 
         if let Some(exe) = find_chrome_executable() {
@@ -424,7 +428,7 @@ impl AzureLoginBrowser {
             })?;
 
         // Spawn handler task
-        tokio::spawn(async move {
+        let handler_task = tokio::spawn(async move {
             while let Some(event) = handler.next().await {
                 if event.is_err() {
                     tracing::trace!("Browser handler event: {:?}", event);
@@ -438,10 +442,11 @@ impl AzureLoginBrowser {
             headless,
             remember_me,
             is_remote: false,
-            remote_handler: None,
+            handler_task: Some(handler_task),
+            interruption_guard: Some(interruption_guard),
             quiet: false,
             profile: profile.to_string(),
-            _ephemeral_dir: ephemeral_dir,
+            ephemeral_directory: ephemeral_dir,
         })
     }
 
@@ -495,19 +500,36 @@ impl AzureLoginBrowser {
             return;
         };
         if should_close_browser(self.is_remote) {
-            if let Err(e) = browser.close().await {
-                tracing::debug!("Browser close returned error: {}", e);
+            if self.ephemeral_directory.is_some() {
+                let _ = tokio::time::timeout(Duration::from_secs(1), browser.clear_cookies()).await;
             }
-            return;
-        }
-        if let Some(page) = page {
-            if let Err(e) = page.close().await {
-                tracing::debug!("Closing the remote page returned error: {}", e);
+            let closed = tokio::time::timeout(Duration::from_secs(3), async {
+                browser.close().await.map_err(|_| ())?;
+                browser.wait().await.map_err(|_| ())?;
+                Ok::<_, ()>(())
+            })
+            .await;
+            if !matches!(closed, Ok(Ok(()))) {
+                let _ = tokio::time::timeout(Duration::from_secs(2), browser.kill()).await;
+            }
+        } else if let Some(page) = page {
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(2), page.close()).await,
+                Ok(Ok(_))
+            ) {
+                tracing::debug!("Could not close the remote sign-in page");
             }
         }
-        if let Some(handler) = self.remote_handler.take() {
+        if let Some(handler) = self.handler_task.take() {
             handler.abort();
         }
+        drop(browser);
+        if let Some(directory) = self.ephemeral_directory.take() {
+            if let Err(error) = directory.close() {
+                tracing::warn!("Could not remove the temporary Chrome profile: {error}");
+            }
+        }
+        self.interruption_guard.take();
     }
 
     /// Whether this browser is connected to a remote Chrome instance.
@@ -576,7 +598,8 @@ impl AzureLoginBrowser {
             saved_at: chrono::Utc::now().to_rfc3339(),
             cookies: filtered,
         };
-        let json = serde_json::to_vec(&store)?;
+        let mut json = Zeroizing::new(Vec::new());
+        serde_json::to_writer(&mut *json, &store)?;
 
         // Encrypt the cookie payload
         let encrypted = super::cookie_crypto::encrypt(&self.profile, &json)?;
@@ -1243,5 +1266,84 @@ mod tests {
             targets.iter().any(|t| t["type"] == "page"),
             "the operator's own tab was closed"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "launches isolated local Chrome and sends SIGINT/SIGTERM to child tests"]
+    async fn interruption_stops_chrome_and_removes_its_temporary_profile() {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        const CHILD: &str = "AWZARS_BROWSER_INTERRUPT_TEST";
+        if let Ok(directory) = std::env::var(CHILD) {
+            let _interruption = crate::util::interrupt::protect_cleanup().unwrap();
+            let mut browser = AzureLoginBrowser::launch_local(true, false, false, "interrupt-test")
+                .await
+                .unwrap();
+            let temporary_profile = browser
+                .ephemeral_directory
+                .as_ref()
+                .unwrap()
+                .path()
+                .to_owned();
+            let chrome = browser.browser.as_mut().unwrap();
+            let process = chrome.get_mut_child().unwrap().inner.id().unwrap();
+            chrome.new_page("about:blank").await.unwrap();
+            let cookie = chromiumoxide::cdp::browser_protocol::network::CookieParam::builder()
+                .name("test-session")
+                .value("synthetic-cookie")
+                .url("https://login.microsoftonline.com/")
+                .build()
+                .unwrap();
+            chrome.set_cookies(vec![cookie]).await.unwrap();
+            assert!(!chrome.get_cookies().await.unwrap().is_empty());
+            std::fs::write(
+                std::path::Path::new(&directory).join("ready"),
+                serde_json::to_vec(&(process, &temporary_profile)).unwrap(),
+            )
+            .unwrap();
+            let result =
+                crate::util::interrupt::until_interrupted(std::future::pending::<Result<()>>())
+                    .await;
+            browser.shutdown().await;
+            assert!(matches!(result, Err(AwzarsError::Interrupted(_))));
+            assert!(!temporary_profile.exists());
+            assert!(matches!(
+                kill(Pid::from_raw(process as i32), None),
+                Err(nix::errno::Errno::ESRCH)
+            ));
+            return;
+        }
+        for signal in [Signal::SIGINT, Signal::SIGTERM] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "browser::chromium::tests::interruption_stops_chrome_and_removes_its_temporary_profile", "--ignored", "--nocapture"])
+                .env(CHILD, directory.path()).spawn().unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let ready = directory.path().join("ready");
+            while !ready.exists() {
+                if std::time::Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("isolated Chrome did not become ready");
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            kill(Pid::from_raw(child.id() as i32), signal).unwrap();
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("interrupted browser did not stop");
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            };
+            assert!(status.success(), "child failed after {signal}: {status}");
+            let (_, profile): (u32, std::path::PathBuf) =
+                serde_json::from_slice(&std::fs::read(ready).unwrap()).unwrap();
+            assert!(!profile.exists());
+        }
     }
 }

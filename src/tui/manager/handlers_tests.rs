@@ -367,6 +367,18 @@ fn profile_save_keeps_changes_made_outside_the_tui() {
     outside.set_profile("outside", tui_profile());
     outside.get_profile_mut("prod").unwrap().region = Some("ap-south-1".into());
     outside.get_profile_mut("dev").unwrap().lock_verifier = Some("outside-verifier".into());
+    outside
+        .extra
+        .insert("future_global".into(), toml::Value::Boolean(true));
+    outside
+        .get_profile_mut("dev")
+        .unwrap()
+        .extra
+        .insert("future_profile".into(), toml::Value::Integer(42));
+    outside.get_profile_mut("dev").unwrap().azure.extra.insert(
+        "future_azure".into(),
+        toml::Value::String("retained".into()),
+    );
     outside.save().unwrap();
 
     let mut form = ProfileForm::from_profile("dev", &tui_profile());
@@ -376,6 +388,15 @@ fn profile_save_keeps_changes_made_outside_the_tui() {
     assert_eq!(manager.status.as_ref().unwrap().0, StatusLevel::Success);
 
     let saved = Config::load().unwrap();
+    assert_eq!(saved.extra["future_global"], toml::Value::Boolean(true));
+    assert_eq!(
+        saved.profiles["dev"].extra["future_profile"],
+        toml::Value::Integer(42)
+    );
+    assert_eq!(
+        saved.profiles["dev"].azure.extra["future_azure"],
+        toml::Value::String("retained".into())
+    );
     assert!(saved.profiles.contains_key("outside"));
     assert_eq!(saved.profiles["prod"].region.as_deref(), Some("ap-south-1"));
     assert_eq!(saved.profiles["dev"].region.as_deref(), Some("eu-west-1"));

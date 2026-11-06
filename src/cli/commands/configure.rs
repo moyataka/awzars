@@ -47,6 +47,7 @@ pub async fn execute(args: &Args) -> Result<()> {
         app_id_uri,
         default_role_arn: role_arn.clone(),
         session_duration,
+        ..Default::default()
     };
 
     let prev_profile = config.profiles.get(&args.profile).cloned();
@@ -96,10 +97,13 @@ pub async fn execute(args: &Args) -> Result<()> {
 /// An existing profile keeps every setting `configure` does not ask for.
 fn build_profile(
     existing: Option<&Profile>,
-    azure: AzureConfig,
+    mut azure: AzureConfig,
     role_arn: Option<String>,
     remember_me: Option<bool>,
 ) -> Profile {
+    if let Some(existing) = existing {
+        azure.extra = existing.azure.extra.clone();
+    }
     Profile {
         azure,
         role_arn,
@@ -254,6 +258,7 @@ mod tests {
                 app_id_uri: "https://old.example/app".into(),
                 default_role_arn: Some("arn:aws:iam::1:role/Old".into()),
                 session_duration: 7200,
+                ..Default::default()
             },
             region: Some("eu-west-1".into()),
             role_arn: Some("arn:aws:iam::1:role/Old".into()),
@@ -265,12 +270,14 @@ mod tests {
             lock_verifier: Some("$argon2id$test".into()),
             lock_ttl_hours: Some(12),
             lock_ai_markers: Some(vec!["TEST_MARKER".into()]),
+            ..Default::default()
         };
         let azure = AzureConfig {
             tenant_id: "new-tenant".into(),
             app_id_uri: "https://new.example/app".into(),
             default_role_arn: Some("arn:aws:iam::1:role/New".into()),
             session_duration: 3600,
+            ..Default::default()
         };
 
         let updated = build_profile(
@@ -326,6 +333,7 @@ mod tests {
                 app_id_uri: "https://stored.example/app".into(),
                 default_role_arn: Some("arn:aws:iam::123456789012:role/Stored".into()),
                 session_duration: 43200,
+                ..Default::default()
             },
             role_arn: Some("arn:aws:iam::123456789012:role/Stored".into()),
             remember_me: Some(true),
@@ -382,6 +390,7 @@ mod tests {
             app_id_uri,
             default_role_arn: role_arn.clone(),
             session_duration,
+            ..Default::default()
         };
         let updated = build_profile(Some(&existing), azure, role_arn, remember_me);
 
@@ -472,6 +481,7 @@ mod tests {
             app_id_uri: "https://example/app".into(),
             default_role_arn: None,
             session_duration: 3600,
+            ..Default::default()
         };
 
         let created = build_profile(None, azure, None, Some(true));

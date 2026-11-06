@@ -34,7 +34,17 @@ async fn main() -> ExitCode {
         .with_env_filter(log_filter)
         .init();
 
-    match run(args).await {
+    let operation = run(args);
+    tokio::pin!(operation);
+    let result = tokio::select! {
+        result = &mut operation => result,
+        error = awzars::util::interrupt::wait() => {
+            // Keep the command alive long enough to close Chrome and restore the tty.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), &mut operation).await;
+            Err(error)
+        }
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -150,6 +160,7 @@ fn default_log_filter(verbose: u8) -> &'static str {
 
 fn error_to_exit_code(e: &AwzarsError) -> u8 {
     match e {
+        AwzarsError::Interrupted(signal) => 128 + signal,
         AwzarsError::Config(_) => 2,
         AwzarsError::AzureAuth(_) => 3,
         AwzarsError::Saml(_) => 3,

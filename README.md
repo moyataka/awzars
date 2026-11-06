@@ -342,6 +342,12 @@ Opens a browser, performs Azure AD login (MFA supported), extracts the SAML
 assertion, calls `AssumeRoleWithSAML`, and caches the resulting AWS
 credentials in the OS keyring + in-memory cache.
 
+If saving newly issued credentials to the keyring fails, login still returns
+them and warns on stderr. A later process may need to sign in again.
+SIGINT (Ctrl-C) and SIGTERM stop an owned Chrome and remove its temporary
+profile; remote Chrome stays open. SIGKILL, a crash or power loss cannot run
+cleanup and may leave temporary browser data behind.
+
 Cached credentials refresh when 15 minutes or less remain, matching the AWS
 SDK's advisory refresh window. Sessions shorter than 30 minutes use half the
 session duration instead, so a 15-minute session is reused from the cache
@@ -369,6 +375,10 @@ passed with `--role-arn` is never replaced. Without a terminal
 the command fails with exit code `3`, lists up to five of the closest
 available roles, and says how to fix the profile. `awzars list-roles` shows
 every role and notes when the configured one is missing.
+
+When a saved session expires during an interactive `list-roles`, it retries
+once in a visible browser. Remote Chrome and non-interactive calls do not
+switch to a local visible browser.
 
 Useful flags:
 
@@ -402,6 +412,11 @@ aws ec2 describe-instances --profile work
 ```
 
 Requires `awzars login --remember-me` once first to establish the persistent browser session.
+
+Local headless refresh requires `remember_me = true` (the default for
+`credential-process`). An explicit `remember_me = false` fails before Chrome
+starts; enable remembering or set `headless = false` to sign in visibly.
+Remote Chrome manages its own session and is exempt from this check.
 
 ### TUI config manager
 
@@ -647,6 +662,8 @@ refresh is in progress; set `AWZARS_REFRESH_LOCK_TIMEOUT_SECS` to a positive
 whole number of seconds to change that limit. The lock file is never deleted.
 
 The directory has mode `0o700` and `config.toml` has mode `0o600` on Unix.
+Unknown settings are preserved when saving the configuration, including
+settings inside a profile's Azure table.
 Example `<config-dir>/config.toml`:
 
 ```toml

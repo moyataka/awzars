@@ -4,6 +4,8 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AwzarsError {
+    #[error("Interrupted by signal {0}")]
+    Interrupted(u8),
     #[error("Configuration error: {0}")]
     Config(String),
 

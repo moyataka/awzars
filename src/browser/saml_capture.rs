@@ -12,6 +12,25 @@ const SIGNIN_HOSTS: &[&str] = &[
     "signin.amazonaws-us-gov.com",
 ];
 
+async fn next_saml_request<Requests, ContinueFuture>(
+    requests: &mut Requests,
+    mut continue_request: impl FnMut(fetch::RequestId) -> ContinueFuture,
+) -> Result<std::sync::Arc<fetch::EventRequestPaused>>
+where
+    Requests: futures::Stream<Item = std::sync::Arc<fetch::EventRequestPaused>> + Unpin,
+    ContinueFuture: std::future::Future<Output = Result<()>>,
+{
+    while let Some(event) = requests.next().await {
+        if is_saml_post(&event.request.method, &event.request.url) {
+            return Ok(event);
+        }
+        if continue_request(event.request_id.clone()).await.is_err() {
+            tracing::debug!("Could not resume a non-SAML request; continuing to wait for sign-in");
+        }
+    }
+    Err(AwzarsError::Browser("SAML request listener closed".into()))
+}
+
 fn is_saml_post(method: &str, destination: &str) -> bool {
     let Ok(destination) = url::Url::parse(destination) else {
         return false;
@@ -89,37 +108,33 @@ pub(super) async fn capture(
         .map_err(|_| AwzarsError::Browser("Unable to enable SAML interception".into()))?;
 
     let capture = async {
-        while let Some(event) = requests.next().await {
-            if !is_saml_post(&event.request.method, &event.request.url) {
-                page.execute(fetch::ContinueRequestParams::new(event.request_id.clone()))
-                    .await
-                    .map_err(|_| {
-                        AwzarsError::Browser("Unable to continue sign-in request".into())
-                    })?;
-                continue;
-            }
+        let event = next_saml_request(&mut requests, |identifier| async move {
+            page.execute(fetch::ContinueRequestParams::new(identifier))
+                .await
+                .map(|_| ())
+                .map_err(|_| AwzarsError::Browser("Unable to continue sign-in request".into()))
+        })
+        .await?;
 
-            let body = match &event.request.post_data_entries {
-                Some(entries) if !entries.is_empty() => body_from_entries(entries),
-                _ => match &event.network_id {
-                    Some(identifier) => page
-                        .execute(network::GetRequestPostDataParams::new(identifier.clone()))
-                        .await
-                        .map(|response| Zeroizing::new(response.result.post_data))
-                        .map_err(|_| AwzarsError::Saml("Unable to read SAML request body".into())),
-                    None => Err(AwzarsError::Saml("Missing SAML request body".into())),
-                },
-            };
-            // Abort even malformed assertions: the console must not consume the POST.
-            page.execute(fetch::FailRequestParams::new(
-                event.request_id.clone(),
-                network::ErrorReason::Aborted,
-            ))
-            .await
-            .map_err(|_| AwzarsError::Browser("Unable to stop SAML console submission".into()))?;
-            return response_from_form(&body?);
-        }
-        Err(AwzarsError::Browser("SAML request listener closed".into()))
+        let body = match &event.request.post_data_entries {
+            Some(entries) if !entries.is_empty() => body_from_entries(entries),
+            _ => match &event.network_id {
+                Some(identifier) => page
+                    .execute(network::GetRequestPostDataParams::new(identifier.clone()))
+                    .await
+                    .map(|response| Zeroizing::new(response.result.post_data))
+                    .map_err(|_| AwzarsError::Saml("Unable to read SAML request body".into())),
+                None => Err(AwzarsError::Saml("Missing SAML request body".into())),
+            },
+        };
+        // Abort even malformed assertions: the console must not consume the POST.
+        page.execute(fetch::FailRequestParams::new(
+            event.request_id.clone(),
+            network::ErrorReason::Aborted,
+        ))
+        .await
+        .map_err(|_| AwzarsError::Browser("Unable to stop SAML console submission".into()))?;
+        response_from_form(&body?)
     };
 
     // Navigation and capture must run together: an immediate auto-submit can
@@ -158,6 +173,46 @@ pub(super) async fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_non_saml_request_does_not_end_capture() {
+        let event = |identifier: &str, method: &str| {
+            std::sync::Arc::new(
+                serde_json::from_value::<fetch::EventRequestPaused>(serde_json::json!({
+                    "requestId": identifier, "frameId": "frame", "resourceType": "Document",
+                    "request": {
+                        "url": "https://signin.aws.amazon.com/saml", "method": method,
+                        "headers": {}, "initialPriority": "High", "referrerPolicy": "no-referrer"
+                    }
+                }))
+                .unwrap(),
+            )
+        };
+        let assertion = event("assertion", "POST");
+        let mut requests = futures::stream::iter([
+            event("cancelled", "GET"),
+            event("continued", "GET"),
+            assertion.clone(),
+        ]);
+        let mut continued = Vec::new();
+        let captured = next_saml_request(&mut requests, |identifier| {
+            continued.push(identifier.as_ref().to_string());
+            std::future::ready(if identifier.as_ref() == "cancelled" {
+                Err(AwzarsError::Browser("Invalid InterceptionId".into()))
+            } else {
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(continued, ["cancelled", "continued"]);
+        assert!(std::sync::Arc::ptr_eq(&captured, &assertion));
+        assert!(
+            next_saml_request(&mut requests, |_| std::future::ready(Ok(())))
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn capture_accepts_only_aws_https_saml_posts() {

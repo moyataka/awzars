@@ -206,59 +206,7 @@ pub fn tty_available() -> bool {
 /// has captured stderr (AWS CLI's `credential_process` invocation, build tools,
 /// any pipeline-style invocation). Echo is restored even if the read errors.
 pub fn read_password_via_tty(prompt: &str) -> Result<PasswordInput> {
-    use nix::sys::termios::{self, LocalFlags, SetArg};
-    use std::io::{BufRead, BufReader, Write};
-
-    let mut tty = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .map_err(|e| AwzarsError::Dialog(format!("cannot open /dev/tty: {}", e)))?;
-
-    let original =
-        termios::tcgetattr(&tty).map_err(|e| AwzarsError::Dialog(format!("tcgetattr: {}", e)))?;
-    let mut quiet = original.clone();
-    // Disable the visible echos but keep ECHONL so the user's `Enter` still
-    // advances the cursor to the next line for a tidy prompt.
-    quiet
-        .local_flags
-        .remove(LocalFlags::ECHO | LocalFlags::ECHOE | LocalFlags::ECHOK);
-    quiet.local_flags.insert(LocalFlags::ECHONL);
-    termios::tcsetattr(&tty, SetArg::TCSANOW, &quiet)
-        .map_err(|e| AwzarsError::Dialog(format!("tcsetattr (off): {}", e)))?;
-
-    let read_result = match write!(tty, "{}: ", prompt).and_then(|_| tty.flush()) {
-        Ok(()) => {
-            // Read from a fresh `/dev/tty` handle so the BufReader doesn't
-            // accidentally consume our writer.
-            match std::fs::OpenOptions::new().read(true).open("/dev/tty") {
-                Ok(file) => {
-                    let mut reader = BufReader::new(file);
-                    let mut line = String::new();
-                    reader
-                        .read_line(&mut line)
-                        .map(|_| line)
-                        .map_err(|e| AwzarsError::Dialog(format!("read /dev/tty: {}", e)))
-                }
-                Err(e) => Err(AwzarsError::Dialog(format!(
-                    "cannot open /dev/tty for read: {}",
-                    e
-                ))),
-            }
-        }
-        Err(e) => Err(AwzarsError::Dialog(format!("write /dev/tty: {}", e))),
-    };
-
-    let _ = termios::tcsetattr(&tty, SetArg::TCSANOW, &original);
-
-    let mut line = read_result?;
-    if line.ends_with('\n') {
-        line.pop();
-    }
-    if line.ends_with('\r') {
-        line.pop();
-    }
-    Ok(Zeroizing::new(line))
+    super::password_prompt::read(prompt)
 }
 
 // --- Session scope ---

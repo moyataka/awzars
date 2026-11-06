@@ -35,24 +35,36 @@ pub async fn execute(args: &Args) -> Result<()> {
     let has_remote = std::env::var("CHROME_REMOTE_URL").is_ok();
     let (headless, no_sandbox, persistent_profile) =
         browser_options(&args.profile, profile, has_remote);
-    let mut browser = AzureLoginBrowser::new(
-        headless,
-        no_sandbox,
-        persistent_profile,
-        &args.profile,
-        false,
-    )
-    .await?;
-    browser.set_quiet(args.quiet);
-
-    // Perform login and get SAML assertion, then close the browser before
-    // parsing — avoids spurious CDP warnings while processing the assertion.
-    let saml_result = browser
-        .login_and_get_saml(&profile.azure.tenant_id, &profile.azure.app_id_uri)
-        .await;
-    browser.shutdown().await;
-    let saml_response = saml_result
-        .map_err(|e| explain_headless_timeout(e, headless, has_remote, &args.profile))?;
+    use std::io::IsTerminal;
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let saml_response =
+        sign_in_with_fallback(headless, has_remote, interactive, |headless| async move {
+            let mut browser = AzureLoginBrowser::new(
+                headless,
+                no_sandbox,
+                persistent_profile,
+                &args.profile,
+                false,
+            )
+            .await?;
+            browser.set_quiet(args.quiet);
+            let result = crate::util::interrupt::until_interrupted(async {
+                let response = browser
+                    .login_and_get_saml(&profile.azure.tenant_id, &profile.azure.app_id_uri)
+                    .await?;
+                if profile.remember_me.unwrap_or(false) {
+                    if let Err(error) = browser.save_cookies().await {
+                        tracing::warn!("Failed to save the renewed browser session: {error}");
+                    }
+                }
+                Ok(response)
+            })
+            .await;
+            browser.shutdown().await;
+            result
+        })
+        .await
+        .map_err(|error| explain_headless_timeout(error, headless, has_remote, &args.profile))?;
 
     // Parse and validate SAML assertion
     let assertion = SamlAssertion::parse(
@@ -109,6 +121,23 @@ pub async fn execute(args: &Args) -> Result<()> {
     Ok(())
 }
 
+async fn sign_in_with_fallback<T, Operation: std::future::Future<Output = Result<T>>>(
+    headless: bool,
+    remote: bool,
+    interactive: bool,
+    mut sign_in: impl FnMut(bool) -> Operation,
+) -> Result<T> {
+    match sign_in(headless).await {
+        Err(AwzarsError::Browser(message))
+            if headless && !remote && interactive && message == "Authentication timed out" =>
+        {
+            tracing::warn!("The saved session expired; opening a browser to sign in again");
+            sign_in(false).await
+        }
+        result => result,
+    }
+}
+
 /// Headless, no-sandbox and persistent-profile settings for the list-roles
 /// browser.
 ///
@@ -161,6 +190,42 @@ fn explain_headless_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn expired_interactive_session_retries_once_in_a_visible_browser() {
+        let mut modes = Vec::new();
+        let result = sign_in_with_fallback(true, false, true, |headless| {
+            modes.push(headless);
+            std::future::ready(if headless {
+                Err(AwzarsError::Browser("Authentication timed out".into()))
+            } else {
+                Ok("renewed assertion")
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, "renewed assertion");
+        assert_eq!(modes, [true, false]);
+    }
+
+    #[tokio::test]
+    async fn fallback_preserves_remote_noninteractive_and_other_failures() {
+        for (headless, remote, interactive, message) in [
+            (true, true, true, "Authentication timed out"),
+            (true, false, false, "Authentication timed out"),
+            (false, false, true, "Authentication timed out"),
+            (true, false, true, "Invalid SAML"),
+        ] {
+            let mut attempts = 0;
+            let result: Result<()> = sign_in_with_fallback(headless, remote, interactive, |_| {
+                attempts += 1;
+                std::future::ready(Err(AwzarsError::Browser(message.into())))
+            })
+            .await;
+            assert!(result.is_err());
+            assert_eq!(attempts, 1);
+        }
+    }
 
     #[test]
     fn browser_options_keep_the_headless_rule_and_use_profile_no_sandbox() {

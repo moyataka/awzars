@@ -8,6 +8,8 @@ use std::collections::HashMap;
 /// Main configuration file structure
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, toml::Value>,
     /// Override the default ~/.aws/config path used by the TUI.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aws_config_path: Option<String>,
@@ -20,6 +22,8 @@ pub struct Config {
 /// A single profile configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Profile {
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, toml::Value>,
     /// Azure AD configuration
     pub azure: AzureConfig,
 
@@ -73,6 +77,7 @@ impl Profile {
     pub fn new(azure: AzureConfig) -> Self {
         Self {
             azure,
+            extra: Default::default(),
             region: None,
             role_arn: None,
             principal_arn: None,

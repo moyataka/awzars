@@ -6,6 +6,61 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 #[test]
+fn configure_preserves_unknown_settings_at_every_level() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("config.toml");
+    std::fs::write(
+        &file,
+        r#"
+future_global = { enabled = true, values = [1, 2] }
+[profiles.work]
+future_profile = "keep me"
+[profiles.work.azure]
+tenant_id = "11111111-2222-3333-4444-aaaaaaaaaaaa"
+app_id_uri = "https://signin.aws.amazon.com/saml"
+future_azure = { nested = "retained" }
+"#,
+    )
+    .unwrap();
+    let before: toml::Value = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_awzars"))
+        .arg("--config-dir")
+        .arg(directory.path())
+        .args([
+            "--profile",
+            "work",
+            "configure",
+            "--non-interactive",
+            "--session-duration",
+            "7200",
+        ])
+        .env_remove("AWZARS_AZURE_TENANT_ID")
+        .env_remove("AWZARS_AZURE_APP_ID_URI")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after: toml::Value = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(after["future_global"], before["future_global"]);
+    assert_eq!(
+        after["profiles"]["work"]["future_profile"],
+        before["profiles"]["work"]["future_profile"]
+    );
+    assert_eq!(
+        after["profiles"]["work"]["azure"]["future_azure"],
+        before["profiles"]["work"]["azure"]["future_azure"]
+    );
+    assert_eq!(
+        after["profiles"]["work"]["azure"]["session_duration"].as_integer(),
+        Some(7200)
+    );
+}
+
+#[test]
 fn new_profile_without_tenant_and_app_is_refused() {
     let directory = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

@@ -69,9 +69,9 @@ fn now_unix_secs() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
-fn generate_key() -> Result<[u8; 32]> {
-    let mut key = [0u8; 32];
-    getrandom::fill(&mut key)
+fn generate_key() -> Result<Zeroizing<[u8; 32]>> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    getrandom::fill(key.as_mut())
         .map_err(|e| AwzarsError::Storage(format!("Failed to generate cookie key: {}", e)))?;
     Ok(key)
 }
@@ -222,7 +222,7 @@ fn load_or_init_from_entry(entry: &Entry, now: i64) -> Result<CachedStore> {
         None => {
             let key = generate_key()?;
             let mut keys = BTreeMap::new();
-            keys.insert(1u8, Zeroizing::new(key));
+            keys.insert(1u8, key);
             let mut created_at = BTreeMap::new();
             created_at.insert(1u8, now);
             let store = CachedStore {
@@ -263,7 +263,7 @@ fn rotate_if_needed(store: &mut CachedStore) -> Result<bool> {
         })?;
 
     let new_key = generate_key()?;
-    store.keys.insert(new_id.get(), Zeroizing::new(new_key));
+    store.keys.insert(new_id.get(), new_key);
     store.created_at.insert(new_id.get(), now);
     store.current = new_id;
 
@@ -292,11 +292,11 @@ fn cache_lookup(profile: &str) -> Option<(u8, [u8; 32])> {
     Some((store.current.get(), **key))
 }
 
-fn cache_lookup_specific(profile: &str, id: u8) -> Option<[u8; 32]> {
+fn cache_lookup_specific(profile: &str, id: u8) -> Option<Zeroizing<[u8; 32]>> {
     let guard = STORE_CACHE.lock().ok()?;
     let map = guard.as_ref()?;
     let store = map.get(profile)?;
-    store.keys.get(&id).map(|k| **k)
+    store.keys.get(&id).cloned()
 }
 
 /// Take the profile's store out of the cache if it holds its current key.
@@ -392,7 +392,7 @@ fn encrypt_with_loader(
         }
         let store = rotated_store;
 
-        let Some(bytes) = store.keys.get(&store.current.get()).map(|key| **key) else {
+        let Some(bytes) = store.keys.get(&store.current.get()).cloned() else {
             cache_replace(profile, store);
             return Err(AwzarsError::Storage(
                 "Current cookie key missing from keystore".into(),
@@ -403,7 +403,7 @@ fn encrypt_with_loader(
         (id, bytes)
     };
 
-    let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
+    let cipher = ChaCha20Poly1305::new_from_slice(key_bytes.as_ref())
         .map_err(|e| AwzarsError::Storage(format!("Cipher init failed: {}", e)))?;
 
     let mut nonce_bytes = [0u8; 12];
@@ -424,7 +424,15 @@ fn encrypt_with_loader(
 }
 
 /// Decrypt binary cookie file contents back to JSON bytes.
-pub fn decrypt(profile: &str, data: &[u8]) -> Result<Vec<u8>> {
+pub fn decrypt(profile: &str, data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    decrypt_with_loader(profile, data, load_store)
+}
+
+fn decrypt_with_loader(
+    profile: &str,
+    data: &[u8],
+    load: impl FnOnce(&str) -> Result<CachedStore>,
+) -> Result<Zeroizing<Vec<u8>>> {
     if data.len() < 1 + 12 + 16 {
         return Err(AwzarsError::Storage("Cookie file too short".into()));
     }
@@ -438,7 +446,7 @@ pub fn decrypt(profile: &str, data: &[u8]) -> Result<Vec<u8>> {
     let key_bytes = if let Some(k) = cache_lookup_specific(profile, key_id) {
         k
     } else {
-        let store = load_store(profile)?;
+        let store = load(profile)?;
         let key = store
             .keys
             .get(&key_id)
@@ -450,28 +458,53 @@ pub fn decrypt(profile: &str, data: &[u8]) -> Result<Vec<u8>> {
                 ))
             })?
             .clone();
-        let bytes: [u8; 32] = *key;
-        cache_replace(profile, store);
-        bytes
+        if let Ok(mut guard) = STORE_CACHE.lock() {
+            guard
+                .get_or_insert_with(HashMap::new)
+                .entry(profile.to_string())
+                .or_insert(store);
+        }
+        key
     };
 
-    let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
+    let cipher = ChaCha20Poly1305::new_from_slice(key_bytes.as_ref())
         .map_err(|e| AwzarsError::Storage(format!("Cipher init failed: {}", e)))?;
 
     let nonce = Nonce::from_slice(&data[1..13]);
     let ciphertext = &data[13..];
 
-    cipher.decrypt(nonce, ciphertext).map_err(|e| {
-        AwzarsError::Storage(format!(
-            "Cookie decryption failed — keyring entry may have been deleted: {}",
-            e
-        ))
-    })
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map(Zeroizing::new)
+        .map_err(|e| {
+            AwzarsError::Storage(format!(
+                "Cookie decryption failed — keyring entry may have been deleted: {}",
+                e
+            ))
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_decrypt_does_not_replace_a_rotated_keystore() {
+        let profile = "delayed-decrypt-regression";
+        let older = stale_store(1);
+        let encrypted = encrypt_with_key(1, &older.keys[&1], b"session");
+        let mut newer = older.clone();
+        rotate_if_needed(&mut newer).unwrap();
+        let expected = newer.keys[&newer.current.get()].clone();
+        let plaintext: Zeroizing<Vec<u8>> = decrypt_with_loader(profile, &encrypted, |_| {
+            cache_replace(profile, newer);
+            Ok(older)
+        })
+        .unwrap();
+        assert_eq!(plaintext.as_slice(), b"session");
+        assert_eq!(cache_lookup_specific(profile, 2), Some(expected));
+        assert_eq!(cache_take(profile).unwrap().current.get(), 2);
+    }
 
     /// Direct encrypt/decrypt with raw keys (no keyring) for testing the crypto layer.
     fn encrypt_with_key(key_id: u8, key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
@@ -880,7 +913,7 @@ mod tests {
         // Key 2 still decrypts from the cache, without another keychain read.
         assert_eq!(
             cache_lookup_specific(profile, 2),
-            Some([2u8; 32]),
+            Some(Zeroizing::new([2u8; 32])),
             "the loaded keystore must be cached"
         );
     }
@@ -1019,6 +1052,6 @@ mod tests {
             .as_mut()
             .unwrap()
             .remove(profile);
-        assert_eq!(decrypt(profile, &data).unwrap(), b"{\"v\":1}");
+        assert_eq!(decrypt(profile, &data).unwrap().as_slice(), b"{\"v\":1}");
     }
 }

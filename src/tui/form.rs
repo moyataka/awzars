@@ -383,6 +383,7 @@ impl ProfileForm {
                 Some(role_arn_val.clone())
             },
             session_duration,
+            ..Default::default()
         };
 
         let profile = Profile {
@@ -408,6 +409,7 @@ impl ProfileForm {
             lock_verifier: None,
             lock_ttl_hours: None,
             lock_ai_markers: None,
+            extra: Default::default(),
         };
 
         Ok((name, profile))
@@ -962,6 +964,7 @@ mod tests {
                 app_id_uri: "https://signin.aws.amazon.com/saml".to_string(),
                 default_role_arn: None,
                 session_duration: 3600,
+                ..Default::default()
             },
             region: Some("us-east-1".to_string()),
             role_arn: Some("arn:aws:iam::123456789012:role/MyRole".to_string()),
@@ -973,6 +976,7 @@ mod tests {
             lock_verifier: None,
             lock_ttl_hours: None,
             lock_ai_markers: None,
+            ..Default::default()
         }
     }
 

@@ -131,7 +131,8 @@ async fn refresh_credentials(
     // Pre-flight: when using local Chrome for re-auth, verify a session exists.
     // Skip this check when CHROME_REMOTE_URL is set (remote Chrome manages its own sessions).
     let using_remote = std::env::var("CHROME_REMOTE_URL").is_ok();
-    if headless && remember_me && !using_remote {
+    validate_headless_session_policy(profile_name, headless, remember_me, using_remote)?;
+    if headless && !using_remote {
         let has_cookies = AzureLoginBrowser::has_cookie_store(profile_name);
         let has_session = config::chromium_data_dir(profile_name)
             .map(|d| d.exists())
@@ -175,9 +176,40 @@ async fn refresh_credentials(
     Ok(outcome.credentials)
 }
 
+fn validate_headless_session_policy(
+    profile_name: &str,
+    headless: bool,
+    remember_me: bool,
+    using_remote: bool,
+) -> Result<()> {
+    if headless && !remember_me && !using_remote {
+        return Err(AwzarsError::Config(format!(
+            "Profile '{profile_name}' sets remember_me = false, which cannot refresh \
+             a local headless browser session. Set remember_me = true and run \
+             `awzars login --profile {profile_name} --remember-me`, or set headless = false \
+             to sign in using a visible browser."
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_headless_refresh_requires_session_persistence() {
+        let error = validate_headless_session_policy("work", true, false, false).unwrap_err();
+        assert!(matches!(error, AwzarsError::Config(_)));
+        assert!(error.to_string().contains("remember_me = false"));
+        for (headless, remembered, remote) in [
+            (true, true, false),
+            (false, false, false),
+            (true, false, true),
+        ] {
+            validate_headless_session_policy("work", headless, remembered, remote).unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn cached_credential_process_does_not_wait_for_the_refresh_lock() {
