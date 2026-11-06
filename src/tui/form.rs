@@ -409,6 +409,7 @@ impl ProfileForm {
             lock_verifier: None,
             lock_ttl_hours: None,
             lock_ai_markers: None,
+            read_only: None,
             extra: Default::default(),
         };
 

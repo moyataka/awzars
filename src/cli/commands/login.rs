@@ -1,5 +1,6 @@
 //! Login command implementation
 
+use crate::auth::aws::session_policy::SessionPolicy;
 use crate::auth::aws::sts::exchange_saml_for_credentials;
 use crate::auth::azure::saml::SamlAssertion;
 use crate::auth::credentials::CredentialRefreshGuard;
@@ -30,6 +31,7 @@ impl CredentialScope {
         if arguments.role_arn.is_some()
             || arguments.azure_tenant.is_some()
             || arguments.azure_app.is_some()
+            || arguments.session_policy.is_some()
         {
             Self::Request
         } else {
@@ -78,6 +80,7 @@ pub struct LoginParams {
     /// `region`; `None` defers to the AWS default chain, then `us-east-1`.
     pub region: Option<String>,
     pub session_duration: i32,
+    pub session_policy: Option<SessionPolicy>,
     pub headless: bool,
     pub no_sandbox: bool,
     pub remember_me: bool,
@@ -148,6 +151,7 @@ async fn exchange_for_credentials(
         &principal_arn,
         params.session_duration,
         params.region.clone(),
+        params.session_policy.as_ref(),
     )
     .await?;
 
@@ -564,6 +568,11 @@ pub(super) fn persist_credentials(
 pub async fn execute(args: &Args) -> Result<()> {
     let login_args = LoginArgs::from_command(&args.command)
         .ok_or_else(|| AwzarsError::Config("Invalid command".to_string()))?;
+    let session_policy = login_args
+        .session_policy
+        .as_deref()
+        .map(SessionPolicy::from_file)
+        .transpose()?;
 
     // Load configuration
     let config = Config::load()?;
@@ -654,6 +663,7 @@ pub async fn execute(args: &Args) -> Result<()> {
         role_arn,
         region: profile.region.clone(),
         session_duration: login_args.resolved_session_duration(&profile.azure),
+        session_policy,
         headless: login_args.headless,
         no_sandbox: login_args.resolved_no_sandbox(profile),
         remember_me,
@@ -661,7 +671,7 @@ pub async fn execute(args: &Args) -> Result<()> {
     };
 
     // Profile scope re-checks stored credentials once it holds the lock.
-    // Identity overrides (request scope) never read or write them, but still
+    // Identity overrides and session policies never read or write them, but still
     // hold the lock through the browser phase: it reads and may rotate the
     // profile's cookie keystore, a read-modify-write that must not interleave.
     let mut refresh_guard = Some(match credential_scope {
@@ -829,6 +839,12 @@ fn output_credentials(
     if login_args.credential_process {
         write_credentials_json(creds)?;
         return Ok(());
+    }
+    if login_args.session_policy.is_some() && !quiet {
+        eprintln!(
+            "Session policy applies only to the credentials returned here. \
+             Normal profile access is unchanged."
+        );
     }
     print_credentials(creds, login_args.output, login_args.show_secrets, quiet)
 }
@@ -1166,6 +1182,7 @@ mod tests {
             azure_app: None,
             role_arn: None,
             session_duration: None,
+            session_policy: None,
             headless: false,
             no_sandbox: false,
             force_refresh: false,
@@ -1190,12 +1207,13 @@ mod tests {
 
     #[test]
     fn identity_overrides_neither_reuse_nor_replace_profile_credentials() {
-        for override_index in 0..3 {
+        for override_index in 0..4 {
             let mut arguments = login_arguments();
             match override_index {
                 0 => arguments.role_arn = Some("arn:aws:iam::123456789012:role/Other".into()),
                 1 => arguments.azure_tenant = Some("11111111-2222-3333-4444-555555555555".into()),
-                _ => arguments.azure_app = Some("https://example.com/other-app".into()),
+                2 => arguments.azure_app = Some("https://example.com/other-app".into()),
+                _ => arguments.session_policy = Some("policy.json".into()),
             }
             let profile = format!("override_{}", uuid::Uuid::new_v4());
             let cache = CacheHandle::new(&profile).unwrap();
@@ -1222,6 +1240,123 @@ mod tests {
             );
             cache.clear().unwrap();
         }
+    }
+
+    #[test]
+    fn session_policy_neither_reuses_nor_replaces_keyring_credentials() {
+        use clap::Parser;
+        let arguments = Args::try_parse_from([
+            "awzars",
+            "login",
+            "--session-policy",
+            "policy.json",
+            "--credential-process",
+        ])
+        .unwrap();
+        let arguments = LoginArgs::from_command(&arguments.command).unwrap();
+        let scope = CredentialScope::for_login(&arguments);
+        let profile = format!("restricted_{}", uuid::Uuid::new_v4());
+        let keyring = KeyringStorage::new(&profile).unwrap();
+        keyring
+            .store_credentials(&credentials("normal-role"), "identity")
+            .unwrap();
+
+        assert!(scope
+            .load(&profile, "identity", 3600, false)
+            .unwrap()
+            .is_none());
+        scope
+            .persist(&credentials("restricted-role"), &profile, "identity")
+            .unwrap();
+        assert_eq!(
+            keyring
+                .get_credentials("identity")
+                .unwrap()
+                .unwrap()
+                .access_key_id,
+            "normal-role"
+        );
+        assert!(CacheHandle::new(&profile)
+            .unwrap()
+            .get_valid_credentials(3600, "identity")
+            .unwrap()
+            .is_none());
+        let persistence =
+            persistence_after_pick(scope, should_save_picked(scope, false, true), true);
+        assert!(!persistence.save_role);
+        assert!(!persistence.rechecks_stored_credentials());
+    }
+
+    #[tokio::test]
+    async fn session_policy_login_cannot_return_cached_normal_credentials() {
+        use clap::Parser;
+        const DIRECTORY_ENV: &str = "AWZARS_SESSION_POLICY_LOGIN_DIRECTORY";
+        if let Ok(directory) = std::env::var(DIRECTORY_ENV) {
+            config::set_config_dir_override(&directory).unwrap();
+            let profile = crate::config::Profile {
+                azure: crate::config::AzureConfig::new(
+                    "11111111-2222-3333-4444-aaaaaaaaaaaa",
+                    "https://signin.aws.amazon.com/saml",
+                ),
+                role_arn: Some("arn:aws:iam::123456789012:role/Test".into()),
+                lock_ai_markers: Some(vec![]),
+                remember_me: Some(false),
+                ..Default::default()
+            };
+            let identity = crate::auth::credentials::credential_identity(
+                &profile.azure.tenant_id,
+                &profile.azure.app_id_uri,
+                profile.role_arn.as_deref(),
+            );
+            let mut configuration = Config::default();
+            configuration.set_profile("default", profile);
+            configuration.save().unwrap();
+            let cache = CacheHandle::new("default").unwrap();
+            cache
+                .store(&credentials("NORMAL-CREDENTIAL-MARKER"), &identity)
+                .unwrap();
+            let path = std::path::Path::new(&directory).join("policy.json");
+            std::fs::write(
+                &path,
+                include_str!("../../../examples/session-policies/ec2-describe-instances.json"),
+            )
+            .unwrap();
+            let arguments = Args::try_parse_from([
+                "awzars",
+                "login",
+                "--credential-process",
+                "--session-policy",
+                path.to_str().unwrap(),
+            ])
+            .unwrap();
+            let result = execute(&arguments).await;
+            // The deliberately unsupported remote URL fails before Chrome or AWS is contacted.
+            assert!(matches!(result, Err(AwzarsError::Browser(_))), "{result:?}");
+            assert_eq!(
+                cache
+                    .get_valid_credentials(3600, &identity)
+                    .unwrap()
+                    .unwrap()
+                    .access_key_id,
+                "NORMAL-CREDENTIAL-MARKER"
+            );
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cli::commands::login::tests::session_policy_login_cannot_return_cached_normal_credentials", "--nocapture"])
+            .env(DIRECTORY_ENV, directory.path())
+            .env("CHROME_REMOTE_URL", "ws://127.0.0.1:1")
+            .env_remove("AWZARS_AZURE_TENANT_ID")
+            .env_remove("AWZARS_AZURE_APP_ID_URI")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("NORMAL-CREDENTIAL-MARKER"));
     }
 
     #[test]

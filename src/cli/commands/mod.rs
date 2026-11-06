@@ -7,6 +7,8 @@ pub mod delete_profile;
 pub mod list_roles;
 pub mod lock;
 pub mod login;
+pub mod mcp_client;
+pub mod read_only;
 pub mod set_password;
 pub mod tui;
 pub mod unlock;

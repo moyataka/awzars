@@ -70,6 +70,10 @@ pub struct Profile {
     /// `Some(vec![])` disables AI detection for this profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_ai_markers: Option<Vec<String>>,
+
+    /// Explicit targets and capabilities available to the approved read-only command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<super::ReadOnlyAccess>,
 }
 
 impl Profile {
@@ -88,6 +92,7 @@ impl Profile {
             lock_verifier: None,
             lock_ttl_hours: None,
             lock_ai_markers: None,
+            read_only: None,
         }
     }
 

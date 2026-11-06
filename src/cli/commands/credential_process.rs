@@ -28,7 +28,29 @@ pub async fn execute(args: &Args) -> Result<()> {
     // Load configuration to verify profile exists
     let config = Config::load()?;
     let profile = config.get_profile(&args.profile)?;
+    let (credentials, _refresh_guard) = load_credentials(
+        args,
+        profile,
+        refresh,
+        cli_headless,
+        cli_no_sandbox,
+        cli_allow_insecure,
+    )
+    .await?;
+    write_credentials_json(&credentials)
+}
 
+pub(super) async fn load_credentials(
+    args: &Args,
+    profile: &Profile,
+    refresh: bool,
+    cli_headless: bool,
+    cli_no_sandbox: bool,
+    cli_allow_insecure: bool,
+) -> Result<(
+    CredentialProcessOutput,
+    Option<crate::auth::credentials::CredentialRefreshGuard>,
+)> {
     // Gate: password lock and/or AI consent. AWS CLI typically inherits the
     // parent shell's stdin when invoking us as a credential_process subprocess,
     // so when stdin is a TTY we let `enforce` inline-prompt for the password
@@ -40,9 +62,57 @@ pub async fn execute(args: &Args) -> Result<()> {
     // without consent receive the explicit `unlock --allow-ai` guidance.
     crate::auth::lock::enforce(&args.profile, profile, true, false)?;
 
+    load_source_credentials(
+        &args.profile,
+        profile,
+        RefreshOptions {
+            refresh,
+            quiet: args.quiet,
+            headless: cli_headless,
+            no_sandbox: cli_no_sandbox,
+            allow_insecure: cli_allow_insecure,
+        },
+    )
+    .await
+}
+
+/// The authenticated path can return only policy-restricted final credentials.
+pub(super) async fn issue_mcp_credentials(
+    authenticated: &crate::config::AuthenticatedMcpRequest<'_>,
+) -> Result<crate::auth::aws::read_only::ReadOnlyCredentials> {
+    let (source, guard) = load_source_credentials(
+        authenticated.profile_name(),
+        authenticated.profile(),
+        RefreshOptions {
+            quiet: true,
+            headless: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    drop(guard);
+    crate::auth::aws::read_only::issue_credentials(authenticated.request(), source).await
+}
+
+#[derive(Default)]
+struct RefreshOptions {
+    refresh: bool,
+    quiet: bool,
+    headless: bool,
+    no_sandbox: bool,
+    allow_insecure: bool,
+}
+
+async fn load_source_credentials(
+    profile_name: &str,
+    profile: &Profile,
+    options: RefreshOptions,
+) -> Result<(
+    CredentialProcessOutput,
+    Option<crate::auth::credentials::CredentialRefreshGuard>,
+)> {
     // Valid stored credentials need no lock, so they are returned without
     // waiting behind another process's browser sign-in (#23).
-    let profile_name = args.profile.as_str();
     let session_duration = profile.azure.session_duration;
     let identity = crate::auth::credentials::credential_identity(
         &profile.azure.tenant_id,
@@ -53,41 +123,38 @@ pub async fn execute(args: &Args) -> Result<()> {
         profile_name,
         &identity,
         session_duration,
-        refresh,
+        options.refresh,
     )? {
-        write_credentials_json(&creds)?;
-        return Ok(());
+        return Ok((creds, None));
     }
 
     // On a miss, check again after taking the process lock so waiters see the
     // credentials persisted by the previous holder before considering another
     // browser. The guard is kept until the credentials are written to stdout.
-    let quiet = args.quiet;
-    let (credentials, _refresh_guard) = crate::auth::credentials::refresh_under_lock(
+    let (credentials, refresh_guard) = crate::auth::credentials::refresh_under_lock(
         profile_name,
         || {
             crate::auth::credentials::try_load_credentials(
                 profile_name,
                 &identity,
                 session_duration,
-                refresh,
+                options.refresh,
             )
         },
         move || async move {
             refresh_credentials(
                 profile_name,
                 profile,
-                quiet,
-                cli_headless,
-                cli_no_sandbox,
-                cli_allow_insecure,
+                options.quiet,
+                options.headless,
+                options.no_sandbox,
+                options.allow_insecure,
             )
             .await
         },
     )
     .await?;
-    write_credentials_json(&credentials)?;
-    Ok(())
+    Ok((credentials, Some(refresh_guard)))
 }
 
 /// Credentials expired or missing: re-authenticate with the browser and
@@ -160,6 +227,7 @@ async fn refresh_credentials(
         role_arn: Some(role_arn),
         region: profile.region.clone(),
         session_duration: profile.azure.session_duration,
+        session_policy: None,
         headless,
         no_sandbox,
         remember_me,
@@ -192,6 +260,10 @@ fn validate_headless_session_policy(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "credential_process_mcp_tests.rs"]
+mod mcp_tests;
 
 #[cfg(test)]
 mod tests {

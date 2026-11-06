@@ -3,9 +3,13 @@
 mod azure_config;
 pub mod cleanup;
 mod profile;
+mod read_only;
 
 pub use azure_config::AzureConfig;
 pub use profile::{Config, Profile};
+pub use read_only::{
+    AuthenticatedMcpRequest, AuthorizedReadOnlyRequest, McpClientGrant, ReadOnlyAccess,
+};
 
 use crate::error::{AwzarsError, Result};
 use directories::ProjectDirs;

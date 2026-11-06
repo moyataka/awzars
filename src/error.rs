@@ -4,6 +4,8 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AwzarsError {
+    #[error("MCP client authentication or authorization failed; check enrollment, secret and requested scope.")]
+    McpAuthentication,
     #[error("Interrupted by signal {0}")]
     Interrupted(u8),
     #[error("Configuration error: {0}")]

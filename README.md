@@ -394,6 +394,324 @@ awzars login --show-secrets                                     # debug only —
 
 > **`--show-secrets` warning.** Prints live access keys to stdout (shell scrollback, paste buffer, `tmux`/`screen` logs). Use only for hand-debugging — wire AWS CLI through `credential-process` for normal use.
 
+### Restricted sessions with an existing role
+
+`login --session-policy FILE` passes an inline JSON session policy to the
+existing `AssumeRoleWithSAML` exchange. It requires no new role and no second
+`AssumeRole` call for a role accessed directly through SAML. The profile's
+password lock and AI consent gate still apply.
+
+```text
+Azure sign-in --> SAML assertion + session policy --> AWS STS
+                                                       |
+                                                       v
+                                            request-only credentials
+```
+
+These logins always authenticate afresh, may reuse remembered browser cookies,
+and never read or replace the profile's stored AWS credentials. The selected
+role is not saved. The policy file is read once before authentication; missing,
+malformed or oversized files fail instead of falling back to normal access.
+The limit is 2,048 characters, including whitespace. AWS validates IAM policy
+semantics; awzars checks JSON structure and STS input limits, and does not
+certify that an arbitrary policy is read-only.
+
+The included [S3 bucket-listing policy](examples/session-policies/s3-list-buckets.json)
+allows `s3:ListAllMyBuckets` and explicitly denies all other actions. The
+existing role must already permit that read. Explicit denies also cover grants
+that resource policies could otherwise give directly to a session. See
+[AWS session policy evaluation](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies.html#policies_session).
+An [EC2 inspection policy](examples/session-policies/ec2-describe-instances.json)
+is also available for roles that permit `ec2:DescribeInstances`.
+
+From the repository root, request a 15-minute session with masked output:
+
+```bash
+awzars --profile work login \
+  --session-policy examples/session-policies/s3-list-buckets.json \
+  --session-duration 900
+```
+
+To verify AWS enforcement, use the [Fish verification script](examples/verify-restricted-session.fish).
+It requires Fish, `aws` and `jq`, and takes the new awzars binary, an existing
+awzars profile, and a region. For example, if the new binary is on your PATH:
+
+```fish
+fish examples/verify-restricted-session.fish (command -s awzars) work ap-southeast-1
+```
+
+If your working AWS CLI profile uses `source_profile` and `role_arn`, it assumes
+another role after signing in through awzars. Supply that final role ARN as the
+fourth argument, with the source awzars profile as the second argument:
+
+```fish
+fish examples/verify-restricted-session.fish (command -s awzars) work ap-southeast-1 \
+  arn:aws:iam::123456789012:role/ExistingWorkloadRole
+```
+
+```text
+awzars source profile --> source credentials --> AssumeRole + session policy
+                                                       |
+                                                       v
+                                            final role --> S3 check
+```
+
+In this mode, the script obtains normal source credentials through the existing
+lock and applies each policy to the final `AssumeRole` request. The source role
+must already be allowed to assume that role, as in the working AWS CLI profile.
+Applying the S3-only policy to the source role would prevent `AssumeRole`, and
+testing that source role directly may fail even when the final role can list
+buckets. This mode verifies session policies on the final role; it does not
+exercise the new SAML policy option. It supports one additional role hop with
+no extra MFA, external ID or session-tag parameters.
+
+The script signs in headlessly with the profile's remembered browser session,
+so it can run from a terminal without a display server. A missing or expired
+session requires a fresh interactive sign-in in an environment with a browser;
+headless mode does not bypass Azure authentication or MFA.
+
+The script creates two restricted sessions, keeping their credentials separate
+in its process. In the additional-role mode, normal source credentials may be
+reused from awzars' cache. First, it runs `aws s3 ls` with the S3 bucket-listing
+policy. Then it runs the same command with the
+[deny-all policy](examples/session-policies/deny-all.json).
+Success means the first request succeeded and the second returned `AccessDenied`
+for `ListBuckets`. An empty bucket list also counts as a successful read. Login
+failures, expired credentials and other errors fail the check instead of being
+counted as an expected denial. The script prints neither credentials nor bucket
+names, and makes no write requests. This demonstrates session-policy enforcement
+for bucket listing; it does not verify write rejection or every AWS service.
+If the existing role cannot list buckets, the first check fails; a session
+policy cannot add permissions missing from the role.
+
+`login --session-policy FILE --credential-process` also emits the standard
+credential JSON for a consumer that captures stdout. The standalone
+`credential-process` command retains its normal behavior. There is no lock
+exception in this feature, and the generic session-policy option must not be
+treated as proof of read-only access.
+
+Use the credentials returned by that invocation for restricted requests.
+Running `aws --profile work ...` afterward still uses the normal credentials
+configured for that AWS profile.
+
+#### Approved read sessions for a consumer
+
+`read-only` constructs a policy from a closed, reviewed capability catalog.
+The caller supplies a target alias and capability name; it cannot supply policy
+JSON, a role ARN, a region or a session duration. Configure the allowed targets
+in the source profile's `config.toml`, using an existing workload role that the
+source role can already assume:
+
+```toml
+[profiles.work.read_only.targets.workload]
+role_arn = "arn:aws:iam::123456789012:role/ExistingWorkloadRole"
+region = "ap-southeast-1"
+capabilities = ["s3-list-buckets", "ec2-describe-instances", "eks-describe-cluster"]
+```
+
+The consumer captures the output of:
+
+```bash
+awzars --profile work read-only --target workload --capability s3-list-buckets
+```
+
+Stdout contains standard AWS credential-process JSON with live temporary keys;
+capture it privately rather than logging or returning it to an agent. The
+profile's password and AI gates apply when `--client` is omitted. An explicitly
+enrolled MCP client can authenticate through stdin and obtain only approved
+sessions while normal access stays locked; see below.
+
+```text
+consumer -- target + capability --> awzars configuration check
+                                         |
+                              profile lock or MCP grant
+                                         |
+                               source credentials (internal)
+                                         |
+                            final AssumeRole + approved policy
+                                         |
+consumer <-- 15-minute restricted session-+
+```
+
+Each request issues a fresh final session. Source credentials may use the
+existing source cache and refresh flow; final credentials never enter that
+cache. Failure returns an error, with no fallback to unrestricted credentials.
+The final STS client uses explicit source credentials and the configured region,
+without loading AWS profile, credential or endpoint overrides.
+
+| Capability | AWS permission and scope |
+|---|---|
+| `s3-list-buckets` | `s3:ListAllMyBuckets`; account-wide bucket metadata, no object reads |
+| `ec2-describe-instances` | `ec2:DescribeInstances`; all instances in the configured region |
+| `eks-describe-cluster` | `eks:DescribeCluster`; clusters in the final role's account and configured region |
+
+This is the initial catalog, not coverage of every AWS CLI command. Unknown
+capabilities fail closed. Adding one requires a reviewed Rust permission type
+and tests; editing configuration cannot introduce arbitrary IAM actions.
+Policies explicitly deny other actions, out-of-scope resources where supported,
+and other regions for regional capabilities. They must fit the STS 2,048-character
+limit. The existing role must already allow the requested read.
+
+This interface supports one existing role hop in the commercial `aws` partition,
+without extra MFA, external ID or session-tag arguments. It does not make a
+source role able to assume itself. Removing a configured capability prevents
+new issuance; already issued credentials remain usable until their AWS expiry.
+`GetCallerIdentity` and Kubernetes authentication remain the exception described
+below; even a deny-all IAM policy does not block them.
+
+#### Enroll a local MCP client
+
+For an MCP running on the same machine and OS account, enroll a client from
+your own terminal after configuring its target:
+
+```sh
+awzars --profile work enroll-mcp --client incident-agent \
+  --target workload --capability s3-list-buckets \
+  --capability eks-describe-cluster \
+  --secret-file /absolute/private/mcp/awzars.secret
+```
+
+The parent directory must already exist. Enrollment verifies the current profile
+password, or asks for confirmation if none is set; it never unlocks the normal
+credential commands. The generated secret is saved to a new 0600 file without
+being printed. Configuration stores an Argon2id verifier and a grant tied to
+the source identity, profile lock and approved target configuration.
+
+The MCP invokes `read-only --target workload --capability eks-describe-cluster
+--client incident-agent`, writes the enrollment secret to private stdin, closes
+the pipe and captures stdout. A valid grant skips the profile lock for this
+restricted issuance only. An invalid grant fails with exit 12; it never falls
+back to unrestricted credentials. Do not pass the secret in arguments or
+environment variables. The MCP keeps returned AWS sessions and EKS tokens private.
+
+Use `awzars --profile work revoke-mcp --client incident-agent` to stop future
+requests. Changing the source identity, password or target configuration also
+invalidates the grant. `awzars lock` affects normal access; it does not revoke
+MCP enrollments. AWS sessions already issued retain their expiry. See
+[MCP_HANDOFF.md](MCP_HANDOFF.md#local-mcp-authentication) for the complete contract.
+
+The enrollment secret is reusable until revocation or a bound setting changes;
+the returned AWS credentials last 15 minutes. Any process that obtains the
+secret can act as that client. Restrict the agent's other tools from accessing
+the secret, MCP process and trusted configuration. This same-account design
+does not establish OS isolation against unrestricted access to the account.
+
+#### Integration boundary: a separate read-only MCP project
+
+The planned agent-facing MCP is a separate project. Awzars provides
+authentication and session-policy support; this repository does not implement
+the MCP or its operation allowlist. The MCP must expose only reviewed read
+operations for incident inspection and logs, validate their parameters and
+targets, and reject writes, execution, unreviewed operations and credential
+export. It must not offer an unrestricted shell or arbitrary AWS/kubectl
+command tool.
+
+```text
+agent --> separate MCP: approved read tools --> AWS / Kubernetes APIs
+                 ^                              ^
+                 | private credentials          | AWS policy enforcement
+              awzars --> final role session + restrictive AWS policy
+```
+
+For chained AWS profiles, the policy belongs on the final `AssumeRole` call.
+The `read-only` command owns that hop and returns only the final session.
+The generic `login --session-policy` option applies to its SAML exchange.
+No new AWS IAM role is required when the existing role chain already permits
+the assumption. See [MCP_HANDOFF.md](MCP_HANDOFF.md) for the consumer contract,
+accepted tradeoffs and the separate MCP project's checks.
+
+**EKS limitation:** AWS session policies restrict AWS EKS management APIs,
+but do not make Kubernetes access read-only. In the live verification,
+`DescribeCluster` was allowed under its allow policy and denied under
+deny-all, while both sessions authenticated to Kubernetes and were authorized
+to list pods, create pods, patch deployments, delete pods and execute in pods.
+Only authorization reviews were performed; no workload writes were attempted.
+S3 bucket listing also demonstrated the expected allow-versus-deny behavior.
+
+The separate MCP must therefore enforce approved Kubernetes reads itself.
+The underlying Kubernetes identity may remain write-capable. Credentials,
+authentication tokens and alternate direct access must stay inaccessible to
+the agent; an agent with the same unrestricted OS access can bypass a local
+MCP command filter. This is a requirement for the separate project's execution
+boundary, not a guarantee provided by an AWS session policy.
+
+Normal awzars password and AI gates remain enforced. Only an authenticated,
+authorized MCP grant qualifies for the approved read-session exception. The
+generic `--session-policy` option never qualifies. The MCP's complete
+AWS/Kubernetes coverage and enforcement remain work for that separate project.
+
+#### Verify EKS management and Kubernetes permissions separately
+
+The [EKS verifier](examples/verify-eks-session.fish) uses the same source profile
+and existing target role, plus an explicit cluster and optional namespace:
+
+```fish
+fish examples/verify-eks-session.fish (command -s awzars) work ap-southeast-1 \
+  arn:aws:iam::123456789012:role/ExistingWorkloadRole example-cluster default
+```
+
+It requires Fish, AWS CLI, `jq`, and `kubectl` with `create --raw` and AWS exec
+credential support. Identity checks call the `SelfSubjectReview` API directly,
+so older clients without `auth whoami` can run the verifier. The selected
+cluster must be reachable and expose `authentication.k8s.io/v1` identity
+reviews; an unavailable API is inconclusive. The namespace defaults to
+`default`. The existing awzars password and AI gates still apply; run from an
+authorized terminal.
+
+```text
+source credentials --> AssumeRole --> EKS-describe session / deny-all session
+                                          |                   |
+                                          +---- AWS EKS ------+
+                                          | DescribeCluster   |
+                                          | allow vs deny     |
+                                          +---- Kubernetes ---+
+                                            identity and
+                                            permission checks
+```
+
+The script first verifies that `DescribeCluster` succeeds with the
+[EKS description policy](examples/session-policies/eks-describe-cluster.json)
+and fails with the deny-all policy. It then checks Kubernetes authentication
+with each session and asks whether it may list pods, read pod logs, create
+pods, patch deployments, delete pods, or execute in pods in the selected namespace.
+Permission checks submit non-persistent `SelfSubjectAccessReview` requests,
+the same API used by `kubectl auth can-i`. They do not perform the operations
+being checked, read pod contents or logs, or change cluster resources.
+
+AWS credentials remain in the verifier's process and children. Tokens are
+generated by the AWS CLI for `kubectl` and never printed by the verifier. The
+script uses a private temporary kubeconfig containing the cluster endpoint,
+certificate and token-generation command; it removes that directory on exit
+and does not change the normal kubeconfig.
+
+- Exit `3`: Kubernetes reported write or execution permission under at least
+  one restricted AWS session. These credentials do not enforce Kubernetes
+  read-only access. No workload write was attempted.
+- Exit `0`: both sessions authenticated, and the sampled Kubernetes write
+  permissions were denied. This does not establish that every Kubernetes
+  resource, namespace or operation is read-only.
+- Exit `1`: a check failed or was inconclusive, including authentication,
+  connectivity, policy issuance or authorization-evaluation errors.
+- Exit `2`: invalid usage or missing dependencies.
+
+IAM session policies and Kubernetes authorization are separate. The deny-all
+session may still authenticate through STS `GetCallerIdentity`, and EKS applies
+the role's existing cluster permissions. See [EKS authentication](https://docs.aws.amazon.com/eks/latest/best-practices/identity-and-access-management.html)
+and [GetCallerIdentity permissions](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetCallerIdentity.html).
+
+For an incident-observation agent, the intended result is pod listing and log
+access allowed, with the sampled write and execution permissions denied.
+The verifier reports existing permissions; it does not change them. If writes
+remain allowed, do not expose those credentials to the agent as read-only.
+Kubernetes must authorize a separate read-only identity, or an isolated
+executor must keep the credentials private and execute only approved reads.
+Adding a read-only grant to an identity that already has write access does not
+remove the existing permissions.
+
+Run the verifier's offline regression tests with
+`python3 tests/verify_eks_session.py`. They use mock executables and temporary
+configuration, without accessing AWS, a cluster or the real credential store.
+
 ### 3. Wire up the AWS CLI
 
 Add to `~/.aws/config`:
@@ -458,7 +776,8 @@ awzars --profile work lock                          # drop this session's unlock
 awzars --profile work set-password --remove         # disable the lock (still needs old password)
 ```
 
-The lock fences `login`, `credential-process`, and `list-roles` behind a
+The lock fences `login`, `credential-process`, `list-roles`, and `read-only`
+without an authenticated MCP client behind a
 session-scoped checkpoint. Designed to stop AI agents (Claude Code, Cursor,
 etc.) from autonomously invoking AWS commands without an explicit human
 checkpoint. See **Hardening against AI agents** below for the threat model
@@ -566,6 +885,7 @@ For wrappers and shell scripts:
 | `9` | Password verification failed |
 | `10` | Lock operation needed a TTY but stdin isn't one |
 | `11` | Session unlock unavailable: the current boot session cannot be identified |
+| `12` | MCP client authentication or authorization failed |
 
 ## Remote Chrome
 

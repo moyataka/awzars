@@ -1,5 +1,6 @@
 //! AWS STS AssumeRoleWithSAML integration
 
+use crate::auth::aws::session_policy::SessionPolicy;
 use crate::credential_process::protocol::CredentialProcessOutput;
 use crate::error::{AwzarsError, Result};
 use aws_config::environment::region::EnvironmentVariableRegionProvider;
@@ -23,7 +24,7 @@ const ERROR_DETAIL_LIMIT: usize = 300;
 /// rewrite the user's terminal. Restrict to ASCII alphanumerics, `_`, `-`,
 /// and `.`, cap the length, and substitute a placeholder if the cleaned
 /// value is empty.
-fn sanitize_aws_error_code(code: &str) -> String {
+pub(super) fn sanitize_aws_error_code(code: &str) -> String {
     let cleaned: String = code
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
@@ -172,6 +173,7 @@ pub async fn exchange_saml_for_credentials(
     principal_arn: &str,
     session_duration: i32,
     profile_region: Option<String>,
+    session_policy: Option<&SessionPolicy>,
 ) -> Result<CredentialProcessOutput> {
     // Region honours the awzars profile first, then the AWS default chain,
     // then a us-east-1 fallback (see `build_region_provider`). Previously this
@@ -182,6 +184,25 @@ pub async fn exchange_saml_for_credentials(
         .await;
     let sts_client = aws_sdk_sts::Client::new(&config);
 
+    exchange_with_client(
+        &sts_client,
+        saml_assertion,
+        role_arn,
+        principal_arn,
+        session_duration,
+        session_policy,
+    )
+    .await
+}
+
+async fn exchange_with_client(
+    sts_client: &aws_sdk_sts::Client,
+    saml_assertion: &str,
+    role_arn: &str,
+    principal_arn: &str,
+    session_duration: i32,
+    session_policy: Option<&SessionPolicy>,
+) -> Result<CredentialProcessOutput> {
     // Call AssumeRoleWithSAML
     // The saml_assertion should be base64-encoded
     let response = sts_client
@@ -190,6 +211,7 @@ pub async fn exchange_saml_for_credentials(
         .principal_arn(principal_arn)
         .saml_assertion(saml_assertion)
         .duration_seconds(session_duration)
+        .set_policy(session_policy.map(|policy| policy.as_str().to_owned()))
         .send()
         .await
         .map_err(|e| {
@@ -227,6 +249,9 @@ pub async fn exchange_saml_for_credentials(
         expiration,
     })
 }
+
+#[cfg(test)]
+mod session_tests;
 
 #[cfg(test)]
 mod tests {

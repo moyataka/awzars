@@ -270,6 +270,17 @@ mod tests {
             lock_verifier: Some("$argon2id$test".into()),
             lock_ttl_hours: Some(12),
             lock_ai_markers: Some(vec!["TEST_MARKER".into()]),
+            read_only: Some(
+                toml::from_str(
+                    r#"
+                [targets.workload]
+                role_arn = "arn:aws:iam::123456789012:role/Workload"
+                region = "ap-southeast-1"
+                capabilities = ["s3-list-buckets"]
+            "#,
+                )
+                .unwrap(),
+            ),
             ..Default::default()
         };
         let azure = AzureConfig {
@@ -309,6 +320,7 @@ mod tests {
         assert_eq!(updated.allow_insecure_remote_chrome, Some(true));
         assert_eq!(updated.lock_verifier.as_deref(), Some("$argon2id$test"));
         assert_eq!(updated.lock_ttl_hours, Some(12));
+        assert_eq!(updated.read_only, existing.read_only);
         assert_eq!(
             updated.lock_ai_markers.as_deref(),
             Some(&["TEST_MARKER".to_string()][..])

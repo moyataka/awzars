@@ -31,6 +31,17 @@ fn profile_saves_reject_collisions_and_preserve_existing_state() {
     };
     let protected = Profile {
         lock_verifier: Some("protected-verifier".into()),
+        read_only: Some(
+            toml::from_str(
+                r#"
+            [targets.workload]
+            role_arn = "arn:aws:iam::123456789012:role/Workload"
+            region = "ap-southeast-1"
+            capabilities = ["s3-list-buckets"]
+        "#,
+            )
+            .unwrap(),
+        ),
         ..profile.clone()
     };
     let mut config = Config {
@@ -77,6 +88,10 @@ fn profile_saves_reject_collisions_and_preserve_existing_state() {
     assert_eq!(
         Config::load().unwrap().profiles["prod"].lock_verifier,
         protected.lock_verifier
+    );
+    assert_eq!(
+        Config::load().unwrap().profiles["prod"].read_only,
+        protected.read_only
     );
 
     for editing in [false, true] {

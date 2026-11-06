@@ -58,6 +58,10 @@ pub enum Command {
         #[arg(long, value_parser = parse_session_duration)]
         session_duration: Option<i32>,
 
+        /// Inline STS session policy JSON file; issues fresh credentials without caching them
+        #[arg(long, value_name = "FILE")]
+        session_policy: Option<std::path::PathBuf>,
+
         /// Run browser in headless mode
         #[arg(long)]
         headless: bool,
@@ -153,6 +157,41 @@ pub enum Command {
         allow_insecure_remote_chrome: bool,
     },
 
+    /// Issue a 15-minute AWS session for one configured, approved read capability
+    ReadOnly {
+        /// Target alias from this profile's read_only.targets configuration
+        #[arg(long)]
+        target: crate::auth::aws::read_only::TargetName,
+
+        /// Reviewed capability enabled for this target (not a Kubernetes boundary)
+        #[arg(long, value_enum)]
+        capability: crate::auth::aws::read_only::ReadOnlyCapability,
+
+        /// Authenticate an enrolled MCP client using its secret on stdin
+        #[arg(long)]
+        client: Option<crate::auth::mcp::McpClientName>,
+    },
+
+    /// Enroll an MCP client for approved reads while normal access stays locked
+    EnrollMcp {
+        #[arg(long)]
+        client: crate::auth::mcp::McpClientName,
+        #[arg(long)]
+        target: crate::auth::aws::read_only::TargetName,
+        /// Repeat for each capability to grant
+        #[arg(long, value_enum, required = true)]
+        capability: Vec<crate::auth::aws::read_only::ReadOnlyCapability>,
+        /// New absolute file path for the client secret (0600); never overwritten
+        #[arg(long)]
+        secret_file: std::path::PathBuf,
+    },
+
+    /// Revoke an MCP client's ability to obtain new sessions
+    RevokeMcp {
+        #[arg(long)]
+        client: crate::auth::mcp::McpClientName,
+    },
+
     /// Clear cached credentials for the current profile
     ClearCache {
         /// Skip the confirmation prompt
@@ -234,6 +273,7 @@ pub struct LoginArgs {
     pub azure_app: Option<String>,
     pub role_arn: Option<String>,
     pub session_duration: Option<i32>,
+    pub session_policy: Option<std::path::PathBuf>,
     pub headless: bool,
     pub no_sandbox: bool,
     pub force_refresh: bool,
@@ -266,6 +306,7 @@ impl LoginArgs {
                 azure_app,
                 role_arn,
                 session_duration,
+                session_policy,
                 headless,
                 no_sandbox,
                 force_refresh,
@@ -280,6 +321,7 @@ impl LoginArgs {
                 azure_app: azure_app.clone(),
                 role_arn: role_arn.clone(),
                 session_duration: *session_duration,
+                session_policy: session_policy.clone(),
                 headless: *headless,
                 no_sandbox: *no_sandbox,
                 force_refresh: *force_refresh,

@@ -24,7 +24,14 @@ async fn main() -> ExitCode {
     // Setup logging
     let log_level = default_log_filter(args.verbose);
 
-    let log_filter = if args.quiet {
+    let log_filter = if args.quiet
+        || matches!(
+            &args.command,
+            Command::ReadOnly {
+                client: Some(_),
+                ..
+            }
+        ) {
         EnvFilter::new("error")
     } else {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level))
@@ -60,6 +67,10 @@ async fn run(args: Args) -> awzars::error::Result<()> {
         Command::ListRoles { .. } => awzars::cli::commands::list_roles::execute(&args).await,
         Command::CredentialProcess { .. } => {
             awzars::cli::commands::credential_process::execute(&args).await
+        }
+        Command::ReadOnly { .. } => awzars::cli::commands::read_only::execute(&args).await,
+        Command::EnrollMcp { .. } | Command::RevokeMcp { .. } => {
+            awzars::cli::commands::mcp_client::execute(&args)
         }
         Command::ClearCache { yes } => {
             awzars::config::Config::load()?.get_profile(&args.profile)?;
@@ -160,6 +171,7 @@ fn default_log_filter(verbose: u8) -> &'static str {
 
 fn error_to_exit_code(e: &AwzarsError) -> u8 {
     match e {
+        AwzarsError::McpAuthentication => 12,
         AwzarsError::Interrupted(signal) => 128 + signal,
         AwzarsError::Config(_) => 2,
         AwzarsError::AzureAuth(_) => 3,

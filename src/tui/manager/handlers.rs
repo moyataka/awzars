@@ -242,6 +242,7 @@ impl ConfigManager {
                     profile.lock_verifier = prev.lock_verifier.clone();
                     profile.lock_ttl_hours = prev.lock_ttl_hours;
                     profile.lock_ai_markers = prev.lock_ai_markers.clone();
+                    profile.read_only = prev.read_only.clone();
                 }
 
                 let identity_changed = prev_profile

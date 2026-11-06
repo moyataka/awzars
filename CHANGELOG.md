@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+
+- `read-only --target NAME --capability NAME` issues fresh 15-minute sessions on an existing final role, using configured targets and typed, reviewed S3 bucket-listing, EC2 instance-description or EKS cluster-description policies with explicit denials. Source credentials stay internal and final sessions are not cached as normal credentials.
+- `enroll-mcp` and `revoke-mcp` manage local client grants from an operator terminal. `read-only --client NAME` authenticates an enrolled secret on stdin to issue approved sessions while normal access stays locked. Grants are bound to source identity, lock and target settings; invalid authentication fails with exit 12. `MCP_HANDOFF.md` documents the separate MCP contract, same-account deployment tradeoff and Kubernetes session-policy limitation.
+- `login --session-policy FILE` requests a fresh SAML session with an inline policy while keeping the password and AI gates. Its credentials are returned only for that invocation and never reuse or replace the profile's credential cache. Includes example policies and a headless Fish verification script comparing S3 bucket listing under an allow policy and a deny-all policy, without write requests. The verifier can also apply the policies to an existing downstream role through `AssumeRole`.
+- An EKS verification example compares AWS `DescribeCluster` enforcement with Kubernetes authentication and permission reviews under restricted sessions, including pod listing and log access for incident observation. It uses direct API reviews for compatibility with older clients without `kubectl auth whoami`, reports remaining Kubernetes write permissions without performing workload writes, and includes offline regression tests.
 - `awzars completions <shell>` prints a completion script for bash, zsh, fish or PowerShell. The README shows how to install it for each shell (#120).
 
 ### Changed
