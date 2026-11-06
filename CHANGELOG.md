@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - Interrupted local sign-ins close Chrome and remove its temporary profile on SIGINT/SIGTERM, clearing temporary-session cookies before shutdown. Remote Chrome remains open (#114).
-- Password entry through `/dev/tty` restores terminal echo on interruption and keeps its input in memory buffers that are wiped on drop (#101).
+- Password entry through `/dev/tty` restores terminal echo on interruption and keeps its input in memory buffers that are wiped on drop. Waiting for input also works on macOS terminals (#101).
 - Cookie encryption keys and serialized/decrypted cookie JSON stay in buffers that are wiped on drop (#103).
 - A delayed cookie read no longer replaces a newer cached keystore after concurrent key rotation (#153).
 - macOS keychain deletion is verified by reading the item back, so a silently failed platform deletion is reported (#154).

@@ -1,9 +1,10 @@
 use crate::error::{AwzarsError, Result};
-use nix::poll::{poll, PollFd, PollFlags};
+use nix::sys::select::{select, FdSet, FD_SETSIZE};
 use nix::sys::termios::{self, LocalFlags, SetArg, Termios};
+use nix::sys::time::{TimeVal, TimeValLike};
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd};
 use zeroize::Zeroizing;
 
 struct TerminalEchoGuard {
@@ -28,6 +29,11 @@ pub(super) fn read(prompt: &str) -> Result<Zeroizing<String>> {
 }
 
 fn read_from_terminal(terminal: File, prompt: &str) -> Result<Zeroizing<String>> {
+    if terminal.as_raw_fd() as usize >= FD_SETSIZE {
+        return Err(AwzarsError::Dialog(
+            "Too many open files to wait for terminal password input".into(),
+        ));
+    }
     let original = termios::tcgetattr(&terminal)
         .map_err(|error| AwzarsError::Dialog(format!("tcgetattr: {error}")))?;
     let guard = TerminalEchoGuard { terminal, original };
@@ -47,10 +53,13 @@ fn read_from_terminal(terminal: File, prompt: &str) -> Result<Zeroizing<String>>
     let mut byte = Zeroizing::new([0u8; 1]);
     loop {
         crate::util::interrupt::check()?;
-        let mut descriptors = [PollFd::new(terminal.as_fd(), PollFlags::POLLIN)];
-        match poll(&mut descriptors, 100u16) {
+        // macOS does not support poll reliably for terminal descriptors.
+        let mut descriptors = FdSet::new();
+        descriptors.insert(terminal.as_fd());
+        let mut timeout = TimeVal::milliseconds(100);
+        match select(None, Some(&mut descriptors), None, None, Some(&mut timeout)) {
             Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
-            Err(error) => return Err(AwzarsError::Dialog(format!("poll /dev/tty: {error}"))),
+            Err(error) => return Err(AwzarsError::Dialog(format!("select /dev/tty: {error}"))),
             Ok(_) => {}
         }
         match terminal.read(byte.as_mut()) {
@@ -106,7 +115,7 @@ mod tests {
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "auth::password_prompt::tests::terminal_echo_is_restored_after_password_or_signal"])
                 .env(CHILD, mode).stdin(Stdio::from(slave.try_clone().unwrap()))
-                .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+                .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
             while termios::tcgetattr(&slave)
                 .unwrap()
@@ -116,7 +125,7 @@ mod tests {
                 if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!("password prompt did not become ready");
+                    panic!("password prompt did not become ready in {mode} mode");
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -132,7 +141,7 @@ mod tests {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!("password prompt did not stop");
+                    panic!("password prompt did not stop in {mode} mode");
                 }
                 std::thread::sleep(Duration::from_millis(10));
             };
