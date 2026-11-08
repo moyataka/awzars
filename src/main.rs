@@ -9,8 +9,22 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    install_panic_hook();
     let args = Args::parse();
+    let private_credentials = matches!(
+        &args.command,
+        Command::ReadOnly {
+            client: Some(_),
+            ..
+        }
+    );
+    let private_output = private_credentials || matches!(&args.command, Command::EnrollMcp { .. });
+    install_panic_hook(private_output);
+    if private_output {
+        if let Err(error) = awzars::auth::mcp::protect_process_secrets() {
+            eprintln!("Error: {error}");
+            return ExitCode::from(2);
+        }
+    }
 
     // Apply --config-dir / AWZARS_CONFIG_DIR before anything else touches
     // config_dir(), so the override is honored consistently.
@@ -24,14 +38,9 @@ async fn main() -> ExitCode {
     // Setup logging
     let log_level = default_log_filter(args.verbose);
 
-    let log_filter = if args.quiet
-        || matches!(
-            &args.command,
-            Command::ReadOnly {
-                client: Some(_),
-                ..
-            }
-        ) {
+    let log_filter = if private_output {
+        EnvFilter::new("off")
+    } else if args.quiet {
         EnvFilter::new("error")
     } else {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level))
@@ -54,7 +63,14 @@ async fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("Error: {}", e);
+            if private_credentials {
+                eprintln!("Error: {}", match &e {
+                    AwzarsError::McpAuthentication => "MCP authentication or authorization failed",
+                    _ => "Restricted session unavailable; check configuration and source authentication in your own terminal",
+                });
+            } else {
+                eprintln!("Error: {}", e);
+            }
             ExitCode::from(error_to_exit_code(&e))
         }
     }
@@ -69,7 +85,20 @@ async fn run(args: Args) -> awzars::error::Result<()> {
             awzars::cli::commands::credential_process::execute(&args).await
         }
         Command::ReadOnly { .. } => awzars::cli::commands::read_only::execute(&args).await,
-        Command::EnrollMcp { .. } | Command::RevokeMcp { .. } => {
+        Command::ReadCatalog {
+            service,
+            aws_operation,
+            offset,
+        } => {
+            let catalog = awzars::auth::aws::read_only::catalog::describe(
+                aws_operation.as_ref(),
+                service.as_deref(),
+                *offset,
+            )?;
+            println!("{}", serde_json::to_string(&catalog)?);
+            Ok(())
+        }
+        Command::EnrollMcp { .. } | Command::RevokeMcp { .. } | Command::SetMcpAccess { .. } => {
             awzars::cli::commands::mcp_client::execute(&args)
         }
         Command::ClearCache { yes } => {
@@ -139,17 +168,21 @@ async fn run(args: Args) -> awzars::error::Result<()> {
 /// run during a panic. The hook wires up best-effort cleanup so a TUI panic
 /// does not leave the user's shell in raw mode and does not leave cookie
 /// keys in heap memory longer than necessary.
-fn install_panic_hook() {
+fn install_panic_hook(private_output: bool) {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = crossterm::terminal::disable_raw_mode();
+        awzars::browser::cookie_crypto::cleanup_keys();
+        if private_output {
+            eprintln!("Error: MCP operation failed unexpectedly");
+            return;
+        }
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::terminal::LeaveAlternateScreen,
             crossterm::event::DisableMouseCapture,
             crossterm::cursor::Show,
         );
-        awzars::browser::cookie_crypto::cleanup_keys();
         default_hook(info);
     }));
 }
@@ -208,6 +241,31 @@ mod tests {
     use super::*;
     use tracing::Level;
     use tracing_subscriber::prelude::*;
+
+    #[test]
+    fn private_panic_diagnostics_never_echo_payload_or_write_terminal_controls() {
+        const CHILD: &str = "AWZARS_PRIVATE_PANIC_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            install_panic_hook(true);
+            assert!(std::panic::catch_unwind(|| panic!("PRIVATE-PANIC-PAYLOAD")).is_err());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::private_panic_diagnostics_never_echo_payload_or_write_terminal_controls",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("PRIVATE-PANIC-PAYLOAD"));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("MCP operation failed unexpectedly")
+        );
+        assert!(!output.stdout.contains(&0x1b));
+    }
 
     /// Evaluates `check` with `filter` installed as the active subscriber.
     fn enabled_under(filter: &str, check: impl FnOnce() -> bool) -> bool {

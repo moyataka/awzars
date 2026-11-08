@@ -16,8 +16,13 @@ pub fn execute(args: &Args) -> Result<()> {
             target,
             capability,
             secret_file,
+            secret_stdout,
         } => {
-            validate_secret_path(secret_file)?;
+            let destination =
+                SecretDestination::from_options(secret_file.as_deref(), *secret_stdout)?;
+            if !profile.mcp_readonly_accessible {
+                return Err(AwzarsError::McpAuthentication);
+            }
             authorize_management(&args.profile, profile)?;
             let (grant, secret) = McpClientGrant::enroll(
                 &args.profile,
@@ -26,9 +31,10 @@ pub fn execute(args: &Args) -> Result<()> {
                 capability.iter().copied().collect(),
             )?;
             // Re-read after the password prompt; refuse a changed authorization context.
+            let _update_guard = management_update_guard()?;
             let mut latest = Config::load()?;
             let current = latest.get_profile_mut(&args.profile)?;
-            if !grant.matches_profile(&args.profile, current)? {
+            if !current.mcp_readonly_accessible || !grant.matches_profile(&args.profile, current)? {
                 return Err(AwzarsError::Config(
                     "Profile or target changed during enrollment; retry".into(),
                 ));
@@ -38,16 +44,43 @@ pub fn execute(args: &Args) -> Result<()> {
                 .as_mut()
                 .ok_or(AwzarsError::McpAuthentication)?
                 .insert_client(client.clone(), grant)?;
-            write_new_secret(secret_file, &secret)?;
-            latest.save().map_err(|error| AwzarsError::Config(format!(
-                "Could not save MCP enrollment: {error}. The new secret file remains at {}; check enrollment before using it.", secret_file.display()
-            )))?;
+            match destination {
+                SecretDestination::CapturedStdout => {
+                    latest.save()?;
+                    write_registration_secret(&secret, std::io::stdout().lock())?;
+                }
+                SecretDestination::File(path) => {
+                    write_new_secret(path, &secret)?;
+                    latest.save().map_err(|error| AwzarsError::Config(format!(
+                        "Could not save MCP enrollment: {error}. The new secret file remains at {}; check enrollment before using it.", path.display()
+                    )))?;
+                    if !args.quiet {
+                        println!("Enrolled MCP client '{client}' for target '{target}'. Secret saved to {}.", path.display());
+                    }
+                }
+            }
+        }
+        Command::SetMcpAccess { enabled } => {
+            authorize_management(&args.profile, profile)?;
+            let _update_guard = management_update_guard()?;
+            let mut latest = Config::load()?;
+            let current = latest.get_profile_mut(&args.profile)?;
+            if current.lock_verifier != profile.lock_verifier
+                || current.mcp_readonly_accessible != profile.mcp_readonly_accessible
+            {
+                return Err(AwzarsError::Config(
+                    "MCP authorization settings changed; retry".into(),
+                ));
+            }
+            current.mcp_readonly_accessible = *enabled;
+            latest.save()?;
             if !args.quiet {
-                println!("Enrolled MCP client '{client}' for target '{target}'. Secret saved to {}. Normal access remains locked unless already unlocked.", secret_file.display());
+                println!("MCP read-only access for '{}': {}. Existing registrations are retained; normal access is unchanged.", args.profile, if *enabled { "enabled" } else { "disabled" });
             }
         }
         Command::RevokeMcp { client } => {
             authorize_management(&args.profile, profile)?;
+            let _update_guard = management_update_guard()?;
             let mut latest = Config::load()?;
             let current = latest.get_profile_mut(&args.profile)?;
             if current.lock_verifier != profile.lock_verifier {
@@ -69,7 +102,7 @@ pub fn execute(args: &Args) -> Result<()> {
 }
 
 fn authorize_management(profile_name: &str, profile: &Profile) -> Result<()> {
-    if !std::io::stdin().is_terminal() {
+    if !std::io::stdin().is_terminal() || !lock::tty_available() {
         return Err(AwzarsError::LockRequiresTty);
     }
     if let Some(marker) = lock::is_ai_context(&lock::effective_markers(profile)) {
@@ -84,19 +117,58 @@ fn authorize_management(profile_name: &str, profile: &Profile) -> Result<()> {
             "Password for awzars profile '{profile_name}' (manage MCP access)"
         ))?;
         lock::verify_password_or_fail(&password, verifier, profile_name)?;
-    } else if !dialoguer::Confirm::new()
-        .with_prompt(format!(
-            "Authorize this MCP enrollment change for profile '{profile_name}'?"
-        ))
-        .default(false)
-        .interact()
-        .map_err(|error| AwzarsError::Dialog(error.to_string()))?
-    {
-        return Err(AwzarsError::Config(
-            "MCP enrollment change cancelled".into(),
-        ));
+    } else {
+        let confirmation = lock::read_password_via_tty(&format!(
+            "Authorize MCP access change for profile '{profile_name}'? Type yes (input hidden)"
+        ))?;
+        if confirmation.as_str() != "yes" {
+            return Err(AwzarsError::Config("MCP access change cancelled".into()));
+        }
     }
     Ok(())
+}
+
+fn management_update_guard() -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let guard = options.open(crate::config::config_dir()?.join("mcp-management.lock"))?;
+    guard.try_lock().map_err(|_| {
+        AwzarsError::Config("Another MCP management update is in progress; retry".into())
+    })?;
+    Ok(guard)
+}
+
+enum SecretDestination<'a> {
+    CapturedStdout,
+    File(&'a Path),
+}
+
+impl<'a> SecretDestination<'a> {
+    fn from_options(path: Option<&'a Path>, stdout: bool) -> Result<Self> {
+        match (path, stdout) {
+            (None, true) if !std::io::stdout().is_terminal() => Ok(Self::CapturedStdout),
+            (Some(path), false) => {
+                validate_secret_path(path)?;
+                Ok(Self::File(path))
+            }
+            _ => Err(AwzarsError::Config(
+                "Choose --secret-file or --secret-stdout; secret stdout must be captured privately, never a terminal".into(),
+            )),
+        }
+    }
+}
+
+fn write_registration_secret(secret: &McpSecret, mut output: impl Write) -> Result<()> {
+    writeln!(output, "{}", secret.expose())
+        .and_then(|_| output.flush())
+        .map_err(|_| AwzarsError::Config(
+            "Registration was saved but secret delivery failed. Revoke this client and register again; no secret recovery is available.".into(),
+        ))
 }
 
 fn validate_secret_path(path: &Path) -> Result<()> {

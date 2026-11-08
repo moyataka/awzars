@@ -170,6 +170,19 @@ pub enum Command {
         /// Authenticate an enrolled MCP client using its secret on stdin
         #[arg(long)]
         client: Option<crate::auth::mcp::McpClientName>,
+        /// Approved service/API identifier from read-catalog; required for aws-read
+        #[arg(long)]
+        aws_operation: Option<crate::auth::aws::read_only::ApprovedAwsOperation>,
+    },
+
+    /// Inspect the pinned AWS read catalog without credentials or cloud access
+    ReadCatalog {
+        #[arg(long, conflicts_with = "aws_operation")]
+        service: Option<String>,
+        #[arg(long)]
+        aws_operation: Option<crate::auth::aws::read_only::ApprovedAwsOperation>,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
     },
 
     /// Enroll an MCP client for approved reads while normal access stays locked
@@ -182,8 +195,21 @@ pub enum Command {
         #[arg(long, value_enum, required = true)]
         capability: Vec<crate::auth::aws::read_only::ReadOnlyCapability>,
         /// New absolute file path for the client secret (0600); never overwritten
+        #[arg(
+            long,
+            required_unless_present = "secret_stdout",
+            conflicts_with = "secret_stdout"
+        )]
+        secret_file: Option<std::path::PathBuf>,
+        /// Send the secret to captured stdout after saving the grant (for MCP keyring setup)
         #[arg(long)]
-        secret_file: std::path::PathBuf,
+        secret_stdout: bool,
+    },
+
+    /// Explicitly enable or disable MCP registration and restricted issuance
+    SetMcpAccess {
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: bool,
     },
 
     /// Revoke an MCP client's ability to obtain new sessions

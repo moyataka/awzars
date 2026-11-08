@@ -410,6 +410,7 @@ impl ProfileForm {
             lock_ttl_hours: None,
             lock_ai_markers: None,
             read_only: None,
+            mcp_readonly_accessible: false,
             extra: Default::default(),
         };
 

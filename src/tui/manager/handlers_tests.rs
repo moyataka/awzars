@@ -30,6 +30,7 @@ fn profile_saves_reject_collisions_and_preserve_existing_state() {
         ..Default::default()
     };
     let protected = Profile {
+        mcp_readonly_accessible: true,
         lock_verifier: Some("protected-verifier".into()),
         read_only: Some(
             toml::from_str(
@@ -93,6 +94,7 @@ fn profile_saves_reject_collisions_and_preserve_existing_state() {
         Config::load().unwrap().profiles["prod"].read_only,
         protected.read_only
     );
+    assert!(Config::load().unwrap().profiles["prod"].mcp_readonly_accessible);
 
     for editing in [false, true] {
         let mut form = if editing {

@@ -496,8 +496,9 @@ configured for that AWS profile.
 
 #### Approved read sessions for a consumer
 
-`read-only` constructs a policy from a closed, reviewed capability catalog.
-The caller supplies a target alias and capability name; it cannot supply policy
+`read-only` constructs a policy from fixed capabilities or a pinned AWS operation catalog.
+The caller supplies a target alias, capability and (for `aws-read`) an approved
+`service/ApiOperation` identifier; it cannot supply policy
 JSON, a role ARN, a region or a session duration. Configure the allowed targets
 in the source profile's `config.toml`, using an existing workload role that the
 source role can already assume:
@@ -544,10 +545,15 @@ without loading AWS profile, credential or endpoint overrides.
 | `s3-list-buckets` | `s3:ListAllMyBuckets`; account-wide bucket metadata, no object reads |
 | `ec2-describe-instances` | `ec2:DescribeInstances`; all instances in the configured region |
 | `eks-describe-cluster` | `eks:DescribeCluster`; clusters in the final role's account and configured region |
+| `aws-read` | Exact IAM actions mapped to one approved `--aws-operation`; requires explicit target and client opt-in |
 
-This is the initial catalog, not coverage of every AWS CLI command. Unknown
-capabilities fail closed. Adding one requires a reviewed Rust permission type
-and tests; editing configuration cannot introduce arbitrary IAM actions.
+The pinned catalog currently covers 7,822 operations in 402 AWS SDK service
+interfaces, including DynamoDB data reads and Personalize recommendations.
+This count describes generated coverage, not a live test or individual security
+audit of every API. `aws-read` never issues one session with every catalog action.
+Unknown capabilities and operations fail closed; editing configuration cannot
+introduce arbitrary IAM actions. See [catalog and consumer contract](docs/aws-read-catalog.md)
+for exclusions, policy granularity, supported CLI behavior and setup.
 Policies explicitly deny other actions, out-of-scope resources where supported,
 and other regions for regional capabilities. They must fit the STS 2,048-character
 limit. The existing role must already allow the requested read.
@@ -559,48 +565,93 @@ new issuance; already issued credentials remain usable until their AWS expiry.
 `GetCallerIdentity` and Kubernetes authentication remain the exception described
 below; even a deny-all IAM policy does not block them.
 
-#### Enroll a local MCP client
+#### Register a local MCP client through its keyring
 
-For an MCP running on the same machine and OS account, enroll a client from
-your own terminal after configuring its target:
+MCP runs separately on the same machine and OS account. Awzars runs only for
+registration and credential requests; there is no console or service to keep open.
+
+Profiles are **ineligible by default**, including existing file enrollments.
+After configuring the target, enable eligibility from your own terminal:
 
 ```sh
-awzars --profile work enroll-mcp --client incident-agent \
-  --target workload --capability s3-list-buckets \
-  --capability eks-describe-cluster \
-  --secret-file /absolute/private/mcp/awzars.secret
+awzars --config-dir /absolute/awzars-config --profile work \
+  set-mcp-access --enabled true
 ```
 
-The parent directory must already exist. Enrollment verifies the current profile
-password, or asks for confirmation if none is set; it never unlocks the normal
-credential commands. The generated secret is saved to a new 0600 file without
-being printed. Configuration stores an Argon2id verifier and a grant tied to
-the source identity, profile lock and approved target configuration.
+This saves `mcp_readonly_accessible = true` under `[profiles.work]`. Missing or
+false denies MCP registration and issuance. Enabling it does not register any
+client. The command verifies the current password or requires explicit `yes`
+confirmation if no password is configured; it never creates a normal unlock.
 
-The MCP invokes `read-only --target workload --capability eks-describe-cluster
---client incident-agent`, writes the enrollment secret to private stdin, closes
-the pipe and captures stdout. A valid grant skips the profile lock for this
-restricted issuance only. An invalid grant fails with exit 12; it never falls
-back to unrestricted credentials. Do not pass the secret in arguments or
-environment variables. The MCP keeps returned AWS sessions and EKS tokens private.
+Run the separate MCP's one-off registration setup in your terminal. Its implemented
+awzars subprocess contract is shown below; MCP must capture the secret output,
+so **do not run this command with stdout connected to your terminal**:
 
-Use `awzars --profile work revoke-mcp --client incident-agent` to stop future
-requests. Changing the source identity, password or target configuration also
-invalidates the grant. `awzars lock` affects normal access; it does not revoke
-MCP enrollments. AWS sessions already issued retain their expiry. See
-[MCP_HANDOFF.md](MCP_HANDOFF.md#local-mcp-authentication) for the complete contract.
+```text
+awzars --config-dir /absolute/awzars-config --profile work enroll-mcp
+       --client incident-agent --target workload
+       --capability s3-list-buckets --capability eks-describe-cluster
+       --secret-stdout
+```
 
-The enrollment secret is reusable until revocation or a bound setting changes;
-the returned AWS credentials last 15 minutes. Any process that obtains the
-secret can act as that client. Restrict the agent's other tools from accessing
-the secret, MCP process and trusted configuration. This same-account design
-does not establish OS isolation against unrestricted access to the account.
+MCP inherits terminal stdin and captures stdout privately. Awzars prompts through
+`/dev/tty`, saves only the verifier and scoped grant, then returns a 43-character
+secret plus newline. MCP saves it in its own OS keyring entry. The profile password
+never passes through MCP. If keyring storage or output delivery fails, setup is
+incomplete: explicitly revoke and register again. There is no secret export,
+automatic replacement, or secret-file fallback. The legacy `--secret-file` option
+remains available explicitly and is mutually exclusive with `--secret-stdout`.
+
+```text
+Human setup -> awzars: save grant -> private secret -> MCP keyring
+Each read   -> MCP: fetch secret -> awzars: check flag + grant
+                                      | final 15-minute AWS session
+Agent       <- read results     <- MCP: use session, then discard
+```
+
+For each read, MCP retrieves the secret, invokes `read-only --client incident-agent
+--target workload --capability eks-describe-cluster`, writes private stdin then
+EOF, and captures standard credential-process JSON. It keeps no secret or final
+session cache across requests. The same keyring registration works across MCP
+restarts and terminals. There are no per-read password or approval prompts.
+Awzars retains its existing internal source-credential cache/refresh behavior.
+
+Awzars checks eligibility and scope before source access, and rechecks saved
+authorization immediately before delivering credentials. Invalid authorization
+exits 12 without credential output or unrestricted fallback. Private output is
+limited to 16 KiB; tracing and core dumps are disabled on these subprocesses.
+
+To pause issuance without deleting registrations:
+
+```sh
+awzars --profile work set-mcp-access --enabled false
+```
+
+To revoke a registration permanently:
+
+```sh
+awzars --profile work revoke-mcp --client incident-agent
+```
+
+Use the same `--config-dir` for every command when using a custom directory.
+Disabling the flag retains grants; re-enabling can restore valid ones. Revocation
+removes the grant, and MCP removes its keyring entry during deregistration.
+Registrations remain valid until revoked or a bound source/password/target setting
+changes. `awzars lock` affects only normal access. Changes observed at the final
+authorization check stop delivery, but already-issued AWS sessions retain their
+15-minute expiry.
+
+Any process that obtains the secret can act as that client. Same-account keyring
+storage does not establish application isolation; actual OS/keyring policy and
+agent tool restrictions still matter. The awzars implementation is tested offline;
+MCP integration and deployment verification belong to the separate consumer project.
 
 #### Integration boundary: a separate read-only MCP project
 
-The planned agent-facing MCP is a separate project. Awzars provides
+The agent-facing MCP is a separate project. Awzars provides
 authentication and session-policy support; this repository does not implement
-the MCP or its operation allowlist. The MCP must expose only reviewed read
+the MCP. Awzars owns the AWS operation-to-policy catalog; MCP owns its tools and
+Kubernetes operation allowlist. The MCP must expose only approved read
 operations for incident inspection and logs, validate their parameters and
 targets, and reject writes, execution, unreviewed operations and credential
 export. It must not offer an unrestricted shell or arbitrary AWS/kubectl
@@ -617,8 +668,7 @@ For chained AWS profiles, the policy belongs on the final `AssumeRole` call.
 The `read-only` command owns that hop and returns only the final session.
 The generic `login --session-policy` option applies to its SAML exchange.
 No new AWS IAM role is required when the existing role chain already permits
-the assumption. See [MCP_HANDOFF.md](MCP_HANDOFF.md) for the consumer contract,
-accepted tradeoffs and the separate MCP project's checks.
+the assumption. The separate MCP project documents its own checks and keyring contract.
 
 **EKS limitation:** AWS session policies restrict AWS EKS management APIs,
 but do not make Kubernetes access read-only. In the live verification,

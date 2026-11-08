@@ -65,6 +65,9 @@ impl McpClientGrant {
         target: TargetName,
         capabilities: BTreeSet<ReadOnlyCapability>,
     ) -> Result<(Self, McpSecret)> {
+        if !profile.mcp_readonly_accessible {
+            return Err(AwzarsError::McpAuthentication);
+        }
         let access = profile.read_only.as_ref().ok_or_else(|| {
             AwzarsError::Config("Configure read-only targets before enrolling a client".into())
         })?;
@@ -74,7 +77,7 @@ impl McpClientGrant {
             ));
         }
         for capability in &capabilities {
-            access.authorize(&target, *capability)?;
+            access.require_capability(&target, *capability)?;
         }
         let secret = McpSecret::generate()?;
         Ok((
@@ -97,6 +100,8 @@ pub struct AuthenticatedMcpRequest<'a> {
     profile_name: &'a str,
     profile: &'a Profile,
     request: AuthorizedReadOnlyRequest,
+    client: McpClientName,
+    grant: &'a McpClientGrant,
 }
 
 impl AuthenticatedMcpRequest<'_> {
@@ -109,6 +114,21 @@ impl AuthenticatedMcpRequest<'_> {
     pub fn request(&self) -> &AuthorizedReadOnlyRequest {
         &self.request
     }
+
+    /// Recheck the exact grant and its binding after potentially slow credential issuance.
+    pub fn revalidate(&self, current: &Profile) -> Result<()> {
+        let current_grant = current
+            .read_only
+            .as_ref()
+            .and_then(|access| access.clients.get(&self.client));
+        if !current.mcp_readonly_accessible
+            || current_grant != Some(self.grant)
+            || !self.grant.matches_profile(self.profile_name, current)?
+        {
+            return Err(AwzarsError::McpAuthentication);
+        }
+        Ok(())
+    }
 }
 
 impl Profile {
@@ -120,6 +140,21 @@ impl Profile {
         capability: ReadOnlyCapability,
         secret: &McpSecret,
     ) -> Result<AuthenticatedMcpRequest<'a>> {
+        self.authenticate_mcp_operation(profile_name, client, target, capability, secret, None)
+    }
+
+    pub fn authenticate_mcp_operation<'a>(
+        &'a self,
+        profile_name: &'a str,
+        client: &McpClientName,
+        target: &TargetName,
+        capability: ReadOnlyCapability,
+        secret: &McpSecret,
+        operation: Option<&crate::auth::aws::read_only::ApprovedAwsOperation>,
+    ) -> Result<AuthenticatedMcpRequest<'a>> {
+        if !self.mcp_readonly_accessible {
+            return Err(AwzarsError::McpAuthentication);
+        }
         let access = self
             .read_only
             .as_ref()
@@ -135,13 +170,22 @@ impl Profile {
         {
             return Err(AwzarsError::McpAuthentication);
         }
-        let request = access
-            .authorize(target, capability)
-            .map_err(|_| AwzarsError::McpAuthentication)?;
+        let request = match (capability, operation) {
+            (ReadOnlyCapability::AwsRead, Some(operation)) => {
+                access.authorize_operation(target, operation)
+            }
+            (ReadOnlyCapability::AwsRead, None) | (_, Some(_)) => {
+                Err(AwzarsError::McpAuthentication)
+            }
+            (_, None) => access.authorize(target, capability),
+        }
+        .map_err(|_| AwzarsError::McpAuthentication)?;
         Ok(AuthenticatedMcpRequest {
             profile_name,
             profile: self,
             request,
+            client: client.clone(),
+            grant,
         })
     }
 }

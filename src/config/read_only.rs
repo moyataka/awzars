@@ -33,6 +33,34 @@ pub struct AuthorizedReadOnlyRequest {
 }
 
 impl ReadOnlyAccess {
+    pub(crate) fn require_capability(
+        &self,
+        target: &TargetName,
+        capability: ReadOnlyCapability,
+    ) -> Result<()> {
+        let configured = self.targets.get(target).ok_or_else(|| {
+            AwzarsError::Config(format!("Read-only target '{target}' is not configured"))
+        })?;
+        if !configured.capabilities.contains(&capability) {
+            return Err(AwzarsError::Config(format!(
+                "Requested read-only capability is not enabled for target '{target}'"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn authorize_operation(
+        &self,
+        target: &TargetName,
+        operation: &crate::auth::aws::read_only::ApprovedAwsOperation,
+    ) -> Result<AuthorizedReadOnlyRequest> {
+        self.require_capability(target, ReadOnlyCapability::AwsRead)?;
+        let configured = &self.targets[target];
+        let scope = ReadOnlyScope::new(configured.role_arn.clone(), configured.region.clone());
+        let policy = ApprovedSessionPolicy::for_operation(operation, &scope)?;
+        Ok(AuthorizedReadOnlyRequest { scope, policy })
+    }
+
     pub fn authorize(
         &self,
         target: &TargetName,

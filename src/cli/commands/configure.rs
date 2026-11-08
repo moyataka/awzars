@@ -270,6 +270,7 @@ mod tests {
             lock_verifier: Some("$argon2id$test".into()),
             lock_ttl_hours: Some(12),
             lock_ai_markers: Some(vec!["TEST_MARKER".into()]),
+            mcp_readonly_accessible: true,
             read_only: Some(
                 toml::from_str(
                     r#"
@@ -321,6 +322,7 @@ mod tests {
         assert_eq!(updated.lock_verifier.as_deref(), Some("$argon2id$test"));
         assert_eq!(updated.lock_ttl_hours, Some(12));
         assert_eq!(updated.read_only, existing.read_only);
+        assert!(updated.mcp_readonly_accessible);
         assert_eq!(
             updated.lock_ai_markers.as_deref(),
             Some(&["TEST_MARKER".to_string()][..])

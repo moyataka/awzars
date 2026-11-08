@@ -71,6 +71,10 @@ pub struct Profile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_ai_markers: Option<Vec<String>>,
 
+    /// Explicit operator opt-in; independent of the normal profile lock.
+    #[serde(default)]
+    pub mcp_readonly_accessible: bool,
+
     /// Explicit targets and capabilities available to the approved read-only command.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<super::ReadOnlyAccess>,
@@ -92,6 +96,7 @@ impl Profile {
             lock_verifier: None,
             lock_ttl_hours: None,
             lock_ai_markers: None,
+            mcp_readonly_accessible: false,
             read_only: None,
         }
     }
@@ -248,6 +253,29 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_access_requires_explicit_boolean_opt_in() {
+        let document = "[azure]\ntenant_id = 'tenant'\napp_id_uri = 'urn:amazon:webservices'\n";
+        assert!(
+            !toml::from_str::<Profile>(document)
+                .unwrap()
+                .mcp_readonly_accessible
+        );
+        for enabled in [false, true] {
+            let profile: Profile =
+                toml::from_str(&format!("mcp_readonly_accessible = {enabled}\n{document}"))
+                    .unwrap();
+            assert_eq!(profile.mcp_readonly_accessible, enabled);
+            assert!(profile.read_only.is_none());
+        }
+        for invalid in ["'true'", "1", "[]"] {
+            assert!(toml::from_str::<Profile>(&format!(
+                "mcp_readonly_accessible = {invalid}\n{document}"
+            ))
+            .is_err());
+        }
+    }
 
     fn profile_with_app_id_uri(app_id_uri: &str) -> Profile {
         Profile::new(AzureConfig::new(

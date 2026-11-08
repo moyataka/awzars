@@ -80,6 +80,20 @@ pub(super) async fn load_credentials(
 pub(super) async fn issue_mcp_credentials(
     authenticated: &crate::config::AuthenticatedMcpRequest<'_>,
 ) -> Result<crate::auth::aws::read_only::ReadOnlyCredentials> {
+    issue_mcp_credentials_with(
+        authenticated,
+        crate::auth::aws::read_only::issue_credentials,
+    )
+    .await
+}
+
+async fn issue_mcp_credentials_with<'a, F>(
+    authenticated: &'a crate::config::AuthenticatedMcpRequest<'_>,
+    issue: impl FnOnce(&'a crate::config::AuthorizedReadOnlyRequest, CredentialProcessOutput) -> F,
+) -> Result<crate::auth::aws::read_only::ReadOnlyCredentials>
+where
+    F: std::future::Future<Output = Result<crate::auth::aws::read_only::ReadOnlyCredentials>>,
+{
     let (source, guard) = load_source_credentials(
         authenticated.profile_name(),
         authenticated.profile(),
@@ -91,7 +105,7 @@ pub(super) async fn issue_mcp_credentials(
     )
     .await?;
     drop(guard);
-    crate::auth::aws::read_only::issue_credentials(authenticated.request(), source).await
+    issue(authenticated.request(), source).await
 }
 
 #[derive(Default)]

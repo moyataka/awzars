@@ -3,6 +3,31 @@ use crate::auth::aws::read_only::ReadOnlyCapability;
 use crate::auth::aws::test_support::{serve_once, Request};
 use crate::config::ReadOnlyAccess;
 
+pub(crate) async fn issue_mock(
+    request: &AuthorizedReadOnlyRequest,
+    source: CredentialProcessOutput,
+    before_response: impl FnOnce() + Send + 'static,
+) -> Result<ReadOnlyCredentials> {
+    let (endpoint, server) =
+        crate::auth::aws::test_support::serve_once_after(SUCCESS, "200 OK", before_response).await;
+    let config = client_configuration(request, &source)?
+        .endpoint_url(endpoint)
+        .retry_config(aws_sdk_sts::config::retry::RetryConfig::disabled())
+        .build();
+    let result = issue_with_client(&aws_sdk_sts::Client::from_conf(config), request).await;
+    let received = server.await.unwrap();
+    assert_eq!(received.parameters["Policy"], request.policy().as_str());
+    assert_eq!(received.parameters["DurationSeconds"], "900");
+    assert_eq!(
+        received.parameters["RoleArn"],
+        request.scope().role().as_str()
+    );
+    assert!(received
+        .headers
+        .contains(&format!("Credential={}/", source.access_key_id)));
+    result
+}
+
 const SUCCESS: &str = r#"<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
   <AssumeRoleResult><Credentials>
     <AccessKeyId>FINAL-RESTRICTED-KEY</AccessKeyId>
@@ -76,6 +101,33 @@ async fn final_role_receives_mandatory_policy_and_only_final_credentials_are_ret
 }
 
 #[tokio::test]
+async fn generic_operation_policy_is_sent_on_the_final_role_exchange() {
+    let access: ReadOnlyAccess = toml::from_str(
+        r#"
+        [targets.workload]
+        role_arn = "arn:aws:iam::123456789012:role/Workload"
+        region = "ap-southeast-1"
+        capabilities = ["aws-read"]
+    "#,
+    )
+    .unwrap();
+    let request = access
+        .authorize_operation(
+            &"workload".parse().unwrap(),
+            &"dynamodb/Query".parse().unwrap(),
+        )
+        .unwrap();
+    let credentials = issue_mock(&request, source_credentials(), || {})
+        .await
+        .unwrap();
+    let output = credentials.0.to_json().unwrap();
+    assert!(output.contains("FINAL-RESTRICTED-KEY"));
+    assert!(!output.contains("SOURCE-KEY"));
+    assert!(request.policy().as_str().contains("dynamodb:Query"));
+    assert!(request.policy().as_str().contains("NotAction"));
+}
+
+#[tokio::test]
 async fn rejected_or_invalid_responses_never_return_credentials_or_private_error_bodies() {
     let denied = r#"<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
         <Error><Type>Sender</Type><Code>AccessDenied</Code><Message>PRIVATE-MARKER</Message></Error>
@@ -118,4 +170,28 @@ fn invalid_source_sessions_fail_before_building_a_client() {
     ] {
         assert!(client_configuration(&authorized_request(), &source).is_err());
     }
+}
+
+#[test]
+fn private_output_is_bounded_and_reauthorization_precedes_delivery() {
+    let credentials = ReadOnlyCredentials(source_credentials());
+    let mut output = Vec::new();
+    assert!(credentials
+        .write_json_after(&mut output, || Err(AwzarsError::McpAuthentication))
+        .is_err());
+    assert!(output.is_empty());
+    let oversized =
+        ReadOnlyCredentials(source_credentials().with_session_token("X".repeat(16 * 1024)));
+    let error = oversized
+        .write_json_after(&mut output, || Ok(()))
+        .unwrap_err();
+    assert!(output.is_empty());
+    assert!(!error.to_string().contains("source-secret"));
+    credentials
+        .write_json_after(&mut output, || Ok(()))
+        .unwrap();
+    let decoded: CredentialProcessOutput = serde_json::from_slice(&output).unwrap();
+    assert_eq!(decoded.version, 1);
+    assert_eq!(decoded.session_token.as_deref(), Some("source-token"));
+    assert!(output.len() <= 16 * 1024);
 }

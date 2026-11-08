@@ -243,6 +243,7 @@ impl ConfigManager {
                     profile.lock_ttl_hours = prev.lock_ttl_hours;
                     profile.lock_ai_markers = prev.lock_ai_markers.clone();
                     profile.read_only = prev.read_only.clone();
+                    profile.mcp_readonly_accessible = prev.mcp_readonly_accessible;
                 }
 
                 let identity_changed = prev_profile

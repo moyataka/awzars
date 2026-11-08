@@ -3,9 +3,33 @@
 use crate::auth::aws::read_only::TargetName;
 use crate::error::{AwzarsError, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use nix::libc;
 use serde::{Deserialize, Serialize};
 use std::{fmt, io::Read, str::FromStr};
 use zeroize::Zeroizing;
+
+/// Applied only in short-lived MCP credential/registration subprocesses.
+pub fn protect_process_secrets() -> Result<()> {
+    let limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: valid pointer to a local rlimit; changes only this process and its children.
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) } != 0 {
+        return Err(AwzarsError::Config(
+            "Could not disable credential process core dumps".into(),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    // Linux pipe-based core collectors can ignore RLIMIT_CORE.
+    // SAFETY: PR_SET_DUMPABLE takes one integer argument, with no pointers.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(AwzarsError::Config(
+            "Could not disable credential process dumping".into(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -124,6 +148,38 @@ impl McpSecretVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_subprocess_disables_core_dumping() {
+        const CHILD: &str = "AWZARS_CORE_LIMIT_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            protect_process_secrets().unwrap();
+            let mut limit = libc::rlimit {
+                rlim_cur: 1,
+                rlim_max: 1,
+            };
+            // SAFETY: valid mutable output pointer to a local rlimit.
+            assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) }, 0);
+            assert_eq!((limit.rlim_cur, limit.rlim_max), (0, 0));
+            #[cfg(target_os = "linux")]
+            // SAFETY: PR_GET_DUMPABLE takes no pointer arguments.
+            assert_eq!(unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) }, 0);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "auth::mcp::tests::private_subprocess_disables_core_dumping",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn secrets_are_bounded_redacted_and_verified_without_echoing_input() {

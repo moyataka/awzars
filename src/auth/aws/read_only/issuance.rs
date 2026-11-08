@@ -1,6 +1,6 @@
 use super::SESSION_DURATION_SECONDS;
 use crate::config::AuthorizedReadOnlyRequest;
-use crate::credential_process::protocol::{write_credentials_json, CredentialProcessOutput};
+use crate::credential_process::protocol::CredentialProcessOutput;
 use crate::error::{AwzarsError, Result};
 use aws_sdk_sts::config::{BehaviorVersion, Credentials, Region};
 use aws_sdk_sts::error::ProvideErrorMetadata;
@@ -11,7 +11,24 @@ pub struct ReadOnlyCredentials(CredentialProcessOutput);
 
 impl ReadOnlyCredentials {
     pub fn write_json(&self) -> Result<()> {
-        write_credentials_json(&self.0)
+        self.write_json_after(std::io::stdout().lock(), || Ok(()))
+    }
+
+    pub(crate) fn write_json_after(
+        &self,
+        mut output: impl std::io::Write,
+        authorize_delivery: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let encoded = zeroize::Zeroizing::new(serde_json::to_string(&self.0)?);
+        if encoded.len() + 1 > 16 * 1024 {
+            return Err(AwzarsError::AwsSts(
+                "Restricted credential output exceeds 16 KiB".into(),
+            ));
+        }
+        authorize_delivery()?;
+        writeln!(output, "{}", encoded.as_str())?;
+        output.flush()?;
+        Ok(())
     }
 }
 
@@ -96,4 +113,4 @@ fn validate_temporary_credentials(credentials: &CredentialProcessOutput) -> Resu
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

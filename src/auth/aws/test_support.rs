@@ -8,6 +8,14 @@ pub struct Request {
 }
 
 pub async fn serve_once(body: &str, status: &str) -> (String, tokio::task::JoinHandle<Request>) {
+    serve_once_after(body, status, || {}).await
+}
+
+pub async fn serve_once_after(
+    body: &str,
+    status: &str,
+    before_response: impl FnOnce() + Send + 'static,
+) -> (String, tokio::task::JoinHandle<Request>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let response = format!(
@@ -38,6 +46,7 @@ pub async fn serve_once(body: &str, status: &str) -> (String, tokio::task::JoinH
                     }
                 }
             };
+            before_response();
             socket.write_all(response.as_bytes()).await.unwrap();
             Request {
                 headers,

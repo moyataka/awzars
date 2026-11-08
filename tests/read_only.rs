@@ -4,6 +4,7 @@ use std::process::{Command, Output, Stdio};
 
 const CONFIG: &str = r#"
     [profiles.work]
+    mcp_readonly_accessible = true
     lock_verifier = "locked-test-profile"
     lock_ai_markers = ["AWZARS_READ_ONLY_TEST_AI"]
     [profiles.work.azure]
@@ -107,6 +108,68 @@ fn arbitrary_policies_actions_and_scope_overrides_are_not_cli_inputs() {
 }
 
 #[test]
+fn public_catalog_discovery_requires_no_profile_or_credentials_and_rejects_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_awzars"))
+        .arg("--config-dir")
+        .arg(directory.path())
+        .args(["read-catalog", "--aws-operation", "dynamodb/Query"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let entry: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(entry["command"], "query");
+    assert_eq!(entry["actions"], serde_json::json!(["dynamodb:Query"]));
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    for operation in [
+        "dynamodb/DeleteTable",
+        "secretsmanager/GetSecretValue",
+        "unknown/GetAnything",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_awzars"))
+            .args(["read-catalog", "--aws-operation", operation])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn registration_requires_exactly_one_secret_destination_and_an_explicit_switch_value() {
+    let arguments = [
+        "awzars",
+        "enroll-mcp",
+        "--client",
+        "incident-agent",
+        "--target",
+        "workload",
+        "--capability",
+        "s3-list-buckets",
+    ];
+    for (extra, accepted) in [
+        (vec![], false),
+        (vec!["--secret-stdout"], true),
+        (vec!["--secret-file", "/tmp/example.secret"], true),
+        (
+            vec!["--secret-stdout", "--secret-file", "/tmp/example.secret"],
+            false,
+        ),
+    ] {
+        assert_eq!(
+            Args::try_parse_from(arguments.into_iter().chain(extra)).is_ok(),
+            accepted
+        );
+    }
+    assert!(Args::try_parse_from(["awzars", "set-mcp-access"]).is_err());
+    for enabled in ["true", "false"] {
+        assert!(Args::try_parse_from(["awzars", "set-mcp-access", "--enabled", enabled]).is_ok());
+    }
+}
+
+#[test]
 fn unknown_mcp_client_is_rejected_without_credentials_or_unlocking() {
     use std::io::Write;
     let directory = tempfile::tempdir().unwrap();
@@ -190,7 +253,14 @@ fn enrollment_management_requires_a_human_terminal_and_writes_nothing() {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    for output in [enrolled, revoked] {
+    let enabled = Command::new(env!("CARGO_BIN_EXE_awzars"))
+        .arg("--config-dir")
+        .arg(directory.path())
+        .args(["--profile", "work", "set-mcp-access", "--enabled", "true"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    for output in [enrolled, revoked, enabled] {
         assert_eq!(
             output.status.code(),
             Some(10),
