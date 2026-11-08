@@ -315,11 +315,20 @@ awzars --help
 
 ## Use
 
+Choose the credential flow that fits your caller:
+
+| Need | Entry point |
+|---|---|
+| Normal AWS CLI access with automatic refresh | [Quickstart](#quickstart) |
+| A one-off session constrained by your own IAM policy | [Restricted sessions](#restricted-sessions-with-an-existing-role) |
+| Approved reads through a separate MCP consumer | [Approved read sessions](#approved-read-sessions-for-a-consumer) |
+| Discover supported AWS reads without signing in | [Read catalog](#discover-supported-aws-reads) |
+
 ### Quickstart
 
 ```bash
-awzars configure                          # 1. set tenant ID, app ID URI, role ARN
-awzars login --remember-me                # 2. log in via browser, persist the session
+awzars --profile work configure           # 1. set tenant ID, app ID URI, role ARN
+awzars --profile work login --remember-me # 2. log in via browser, persist the session
 printf '[profile work]\ncredential_process = /usr/local/bin/awzars credential-process --profile work\n' >> ~/.aws/config
 aws s3 ls --profile work                  # 3. AWS CLI now refreshes credentials silently
 ```
@@ -564,6 +573,33 @@ source role able to assume itself. Removing a configured capability prevents
 new issuance; already issued credentials remain usable until their AWS expiry.
 `GetCallerIdentity` and Kubernetes authentication remain the exception described
 below; even a deny-all IAM policy does not block them.
+
+#### Discover supported AWS reads
+
+Inspect the pinned catalog without signing in, reading profile secrets or
+contacting AWS:
+
+```bash
+awzars read-catalog
+awzars read-catalog --service dynamodb
+awzars read-catalog --aws-operation dynamodb/Query
+```
+
+Service results are paginated; use the returned `next_offset` with `--offset`
+to read the next page. Operation details include the AWS CLI command and mapped
+IAM actions.
+
+To authorize catalog reads, explicitly add `"aws-read"` to the target's
+`capabilities` and enroll the client with `--capability aws-read`. Existing
+registrations do not gain this capability automatically; changing target
+settings requires re-enrollment. Each private credential request then includes
+`--capability aws-read --aws-operation dynamodb/Query`.
+
+The resulting session is bounded by IAM actions, which can cover multiple API
+operations. The consumer must enforce the exact requested operation and any
+stricter account or resource restrictions. See the
+[catalog contract](docs/aws-read-catalog.md#policy-and-account-limits) for limits
+and the conditioned KMS permission used for encrypted S3 object reads.
 
 #### Register a local MCP client through its keyring
 
