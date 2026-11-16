@@ -240,6 +240,9 @@ impl ConfigManager {
                     profile.extra = prev.extra.clone();
                     profile.azure.extra = prev.azure.extra.clone();
                     profile.lock_verifier = prev.lock_verifier.clone();
+                    if prev.lock_verifier.is_some() {
+                        profile.allow_ai = false;
+                    }
                     profile.lock_ttl_hours = prev.lock_ttl_hours;
                     profile.lock_ai_markers = prev.lock_ai_markers.clone();
                     profile.read_only = prev.read_only.clone();

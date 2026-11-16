@@ -89,7 +89,7 @@ fn profile_saves_reject_collisions_and_preserve_existing_state() {
     manager.form = Some(form);
     manager.save_awzars_form();
     assert_eq!(manager.status.as_ref().unwrap().0, StatusLevel::Success);
-    assert!(Config::load().unwrap().profiles["prod"].allow_ai);
+    assert!(!Config::load().unwrap().profiles["prod"].allow_ai);
     assert_eq!(
         Config::load().unwrap().profiles["prod"].lock_verifier,
         protected.lock_verifier

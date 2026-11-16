@@ -71,6 +71,7 @@ const TOGGLE_LABELS: [&str; TOGGLE_COUNT] = [
 
 /// Form state for editing/creating a profile
 pub struct ProfileForm {
+    password_locked: bool,
     /// Field definitions in display order
     pub fields: Vec<FormField>,
     /// Toggle values indexed by the TOGGLE_* constants.
@@ -129,6 +130,7 @@ impl ProfileForm {
         ];
 
         Self {
+            password_locked: profile.lock_verifier.is_some(),
             fields,
             toggles,
             focused: IDX_TENANT,
@@ -149,6 +151,7 @@ impl ProfileForm {
         form.fields[IDX_NAME].value.clear();
         form.fields[IDX_NAME].cursor_pos = 0;
         form.original_name = None;
+        form.password_locked = false;
         form.focused = IDX_NAME;
         form.original_values[IDX_NAME] = String::new();
         form
@@ -173,6 +176,7 @@ impl ProfileForm {
         let mut toggles = [None; TOGGLE_COUNT];
         toggles[TOGGLE_ALLOW_AI] = Some(false);
         Self {
+            password_locked: false,
             fields,
             toggles,
             focused: 0,
@@ -235,9 +239,17 @@ impl ProfileForm {
         );
     }
 
+    pub fn toggle_count(&self) -> usize {
+        if self.password_locked {
+            TOGGLE_ALLOW_AI
+        } else {
+            TOGGLE_COUNT
+        }
+    }
+
     /// Total navigable items (fields + toggles)
     pub fn total_items(&self) -> usize {
-        FIELD_COUNT + TOGGLE_COUNT
+        FIELD_COUNT + self.toggle_count()
     }
 
     /// Move focus up/down
@@ -301,6 +313,9 @@ impl ProfileForm {
     /// Toggle the currently focused toggle
     pub fn toggle_current(&mut self) {
         if let Some(idx) = self.toggle_focused {
+            if idx >= self.toggle_count() {
+                return;
+            }
             if idx == TOGGLE_ALLOW_AI {
                 self.toggles[idx] = Some(!self.toggles[idx].unwrap_or(false));
                 return;
@@ -422,7 +437,7 @@ impl ProfileForm {
             lock_verifier: None,
             lock_ttl_hours: None,
             lock_ai_markers: None,
-            allow_ai: self.toggles[TOGGLE_ALLOW_AI].unwrap_or(false),
+            allow_ai: !self.password_locked && self.toggles[TOGGLE_ALLOW_AI].unwrap_or(false),
             read_only: None,
             mcp_readonly_accessible: false,
             extra: Default::default(),
@@ -995,6 +1010,24 @@ mod tests {
             allow_ai: false,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn password_locked_profiles_hide_and_reject_persistent_ai_consent() {
+        let mut profile = valid_profile();
+        profile.lock_verifier = Some("verifier".into());
+        profile.allow_ai = true;
+        let mut form = ProfileForm::from_profile("work", &profile);
+        assert_eq!(form.toggle_count(), TOGGLE_ALLOW_AI);
+        form.move_focus(100);
+        assert_eq!(form.toggle_focused, Some(TOGGLE_ALLOW_INSECURE));
+        form.toggle_focused = Some(TOGGLE_ALLOW_AI);
+        form.toggle_current();
+        assert!(!form.to_profile().unwrap().1.allow_ai);
+        assert_eq!(
+            ProfileForm::clone_from("work", &profile).toggle_count(),
+            TOGGLE_COUNT
+        );
     }
 
     #[test]

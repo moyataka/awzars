@@ -1241,7 +1241,7 @@ fn enforce_in_boot(
         let token_ok = token.as_ref().is_some_and(|t| {
             t.password_unlocked
                 && t.verifier_fp.as_deref() == Some(current_fp.as_str())
-                && (ai_marker.is_none() || profile.allow_ai || t.allow_ai)
+                && (ai_marker.is_none() || t.allow_ai)
         });
 
         if token_ok {
@@ -1457,15 +1457,14 @@ mod tests {
         profile.lock_verifier = Some(TEST_VERIFIER.into());
         assert!(enforce("persistent", &profile, false, false).is_err());
         write_unlock("persistent", 3600, false, true, Some(TEST_VERIFIER)).unwrap();
+        assert!(enforce("persistent", &profile, false, false).is_err());
+        write_unlock("persistent", 3600, true, true, Some(TEST_VERIFIER)).unwrap();
         assert!(is_already_unlocked(enforce(
             "persistent",
             &profile,
             false,
             false
         )));
-        profile.allow_ai = false;
-        assert!(enforce("persistent", &profile, false, false).is_err());
-        profile.allow_ai = true;
         profile.lock_verifier = Some(TEST_VERIFIER_2.into());
         assert!(enforce("persistent", &profile, false, false).is_err());
         profile.lock_verifier = Some(TEST_VERIFIER.into());

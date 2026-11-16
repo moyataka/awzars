@@ -851,8 +851,10 @@ hand-edit.
 
 In the awzars profile editor, enable **Allow AI by default** and save to
 allow AI access across all sessions for that profile (`allow_ai = true` in
-`config.toml`). This defaults to off. Password-protected profiles still
-require a valid password unlock in each session. Turn the setting off to
+`config.toml`). This defaults to off and is shown in the profile preview. It is available
+only for profiles without a password lock. Password-protected profiles hide
+the setting and always require explicit session consent with `unlock --allow-ai`,
+even if `allow_ai = true` was previously saved. Turn the setting off to
 restore AI consent checks; existing explicit `unlock --allow-ai` grants remain
 valid until expired or removed with `lock` in their session.
 

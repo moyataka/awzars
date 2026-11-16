@@ -8,7 +8,6 @@
 use super::{ConfigManager, Mode, StatusLevel, Tab};
 use crate::tui::form::{
     ProfileForm, AWS_IDX_CRED_PROC, AWS_IDX_REGION, AWS_IDX_SOURCE_PROFILE, IDX_REGION,
-    TOGGLE_COUNT,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -159,7 +158,7 @@ impl ConfigManager {
         let profile = name.and_then(|n| self.config.profiles.get(n));
 
         let lines = if let (Some(name), Some(profile)) = (name, profile) {
-            vec![
+            let mut lines = vec![
                 Line::from(vec![
                     Span::styled(" Profile: ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
@@ -195,7 +194,14 @@ impl ConfigManager {
                     "Locked",
                     &format_lock(profile.lock_verifier.is_some(), profile.lock_ttl_hours),
                 ),
-            ]
+            ];
+            if profile.lock_verifier.is_none() {
+                lines.push(field_line(
+                    "Allow AI by default",
+                    ProfileForm::format_toggle(Some(profile.allow_ai)),
+                ));
+            }
+            lines
         } else {
             vec![
                 Line::from(""),
@@ -287,7 +293,7 @@ impl ConfigManager {
         }
 
         // Render toggle fields
-        for ti in 0..TOGGLE_COUNT {
+        for ti in 0..form.toggle_count() {
             let is_focused = form.toggle_focused == Some(ti) && !form.is_editing();
             let style = if is_focused {
                 Style::default()
