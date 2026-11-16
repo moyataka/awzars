@@ -83,9 +83,13 @@ fn profile_saves_reject_collisions_and_preserve_existing_state() {
     form.focused = 0;
     assert!(form.focused_field_mut().is_none());
     form.fields[5].value = "eu-west-1".into();
+    form.toggle_focused = Some(crate::tui::form::TOGGLE_ALLOW_AI);
+    form.toggle_current();
+    assert!(form.is_dirty());
     manager.form = Some(form);
     manager.save_awzars_form();
     assert_eq!(manager.status.as_ref().unwrap().0, StatusLevel::Success);
+    assert!(Config::load().unwrap().profiles["prod"].allow_ai);
     assert_eq!(
         Config::load().unwrap().profiles["prod"].lock_verifier,
         protected.lock_verifier

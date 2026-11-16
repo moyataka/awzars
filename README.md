@@ -849,6 +849,13 @@ that exposes `role_session_name` alongside the source-profile autocomplete,
 so the entry written into `~/.aws/config` is complete without a follow-up
 hand-edit.
 
+In the awzars profile editor, enable **Allow AI by default** and save to
+allow AI access across all sessions for that profile (`allow_ai = true` in
+`config.toml`). This defaults to off. Password-protected profiles still
+require a valid password unlock in each session. Turn the setting off to
+restore AI consent checks; existing explicit `unlock --allow-ai` grants remain
+valid until expired or removed with `lock` in their session.
+
 ### Profile lock (optional, opt-in)
 
 ```bash

@@ -57,17 +57,23 @@ pub const TOGGLE_REMEMBER_ME: usize = 0;
 pub const TOGGLE_HEADLESS: usize = 1;
 pub const TOGGLE_NO_SANDBOX: usize = 2;
 pub const TOGGLE_ALLOW_INSECURE: usize = 3;
-pub const TOGGLE_COUNT: usize = 4;
+pub const TOGGLE_ALLOW_AI: usize = 4;
+pub const TOGGLE_COUNT: usize = 5;
 
 /// Toggle labels (indexed by TOGGLE_* constants)
-const TOGGLE_LABELS: [&str; TOGGLE_COUNT] =
-    ["Remember Me", "Headless", "No Sandbox", "Insecure Chrome"];
+const TOGGLE_LABELS: [&str; TOGGLE_COUNT] = [
+    "Remember Me",
+    "Headless",
+    "No Sandbox",
+    "Insecure Chrome",
+    "Allow AI by default",
+];
 
 /// Form state for editing/creating a profile
 pub struct ProfileForm {
     /// Field definitions in display order
     pub fields: Vec<FormField>,
-    /// Toggle values: [remember_me, headless, no_sandbox, allow_insecure_remote_chrome]
+    /// Toggle values indexed by the TOGGLE_* constants.
     pub toggles: [Option<bool>; TOGGLE_COUNT],
     /// Index of the focused field
     pub focused: usize,
@@ -119,6 +125,7 @@ impl ProfileForm {
             profile.headless,
             profile.no_sandbox,
             profile.allow_insecure_remote_chrome,
+            Some(profile.allow_ai),
         ];
 
         Self {
@@ -163,14 +170,16 @@ impl ProfileForm {
         ];
         let original_values = fields.iter().map(|f| f.value.clone()).collect();
 
+        let mut toggles = [None; TOGGLE_COUNT];
+        toggles[TOGGLE_ALLOW_AI] = Some(false);
         Self {
             fields,
-            toggles: [None; TOGGLE_COUNT],
+            toggles,
             focused: 0,
             toggle_focused: None,
             original_name: None,
             original_values,
-            original_toggles: [None; TOGGLE_COUNT],
+            original_toggles: toggles,
             region_suggestions: Vec::new(),
             region_suggestion_selected: 0,
         }
@@ -292,6 +301,10 @@ impl ProfileForm {
     /// Toggle the currently focused toggle
     pub fn toggle_current(&mut self) {
         if let Some(idx) = self.toggle_focused {
+            if idx == TOGGLE_ALLOW_AI {
+                self.toggles[idx] = Some(!self.toggles[idx].unwrap_or(false));
+                return;
+            }
             self.toggles[idx] = match self.toggles[idx] {
                 None => Some(true),
                 Some(true) => Some(false),
@@ -409,6 +422,7 @@ impl ProfileForm {
             lock_verifier: None,
             lock_ttl_hours: None,
             lock_ai_markers: None,
+            allow_ai: self.toggles[TOGGLE_ALLOW_AI].unwrap_or(false),
             read_only: None,
             mcp_readonly_accessible: false,
             extra: Default::default(),
@@ -978,8 +992,25 @@ mod tests {
             lock_verifier: None,
             lock_ttl_hours: None,
             lock_ai_markers: None,
+            allow_ai: false,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn ai_default_toggle_round_trips_and_can_be_disabled() {
+        let mut profile = valid_profile();
+        profile.allow_ai = true;
+        let mut form = ProfileForm::from_profile("work", &profile);
+        assert!(!form.is_dirty());
+        assert!(form.to_profile().unwrap().1.allow_ai);
+        form.toggle_focused = Some(TOGGLE_ALLOW_AI);
+        form.toggle_current();
+        assert!(form.is_dirty());
+        assert!(!form.to_profile().unwrap().1.allow_ai);
+        form.toggle_current();
+        assert!(form.to_profile().unwrap().1.allow_ai);
+        assert!(!ProfileForm::new_empty().toggles[TOGGLE_ALLOW_AI].unwrap_or(false));
     }
 
     #[test]
@@ -1075,7 +1106,7 @@ mod tests {
         assert_eq!(form.focused, 1);
 
         form.move_focus(10); // Should clamp to last toggle
-        assert_eq!(form.toggle_focused, Some(TOGGLE_ALLOW_INSECURE));
+        assert_eq!(form.toggle_focused, Some(TOGGLE_ALLOW_AI));
 
         form.move_focus(-10); // Should clamp to 0
         assert_eq!(form.focused, 0);

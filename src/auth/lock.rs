@@ -7,7 +7,8 @@
 //! - **Unlocked profile under AI**: even without a password, an AI agent
 //!   (detected via env markers like `CLAUDECODE`) cannot use the profile in a
 //!   terminal session until the user consents via
-//!   `awzars unlock <profile> --allow-ai`.
+//!   `awzars unlock <profile> --allow-ai`, or enables persistent `Profile.allow_ai`.
+//!   Persistent consent never replaces a password-derived session token.
 //!
 //! Session boundary is the controlling-terminal session (see `session_scope`):
 //! the session id of the nearest ancestor still holding a tty, so it survives
@@ -1223,7 +1224,7 @@ fn enforce_in_boot(
     let ai_marker = is_ai_context(&markers);
 
     // Fast path: nothing to enforce.
-    if profile.lock_verifier.is_none() && ai_marker.is_none() {
+    if profile.lock_verifier.is_none() && (ai_marker.is_none() || profile.allow_ai) {
         return Ok(GateOutcome::NotLocked);
     }
 
@@ -1240,7 +1241,7 @@ fn enforce_in_boot(
         let token_ok = token.as_ref().is_some_and(|t| {
             t.password_unlocked
                 && t.verifier_fp.as_deref() == Some(current_fp.as_str())
-                && (ai_marker.is_none() || t.allow_ai)
+                && (ai_marker.is_none() || profile.allow_ai || t.allow_ai)
         });
 
         if token_ok {
@@ -1428,6 +1429,50 @@ mod tests {
 
     fn is_already_unlocked(outcome: Result<GateOutcome>) -> bool {
         matches!(outcome, Ok(GateOutcome::AlreadyUnlocked))
+    }
+
+    #[test]
+    fn persistent_ai_consent_crosses_sessions_but_preserves_password_lock() {
+        let _guard = temp_xdg();
+        const MARKER: &str = "AWZARS_PERSISTENT_AI_TEST";
+        std::env::set_var(MARKER, "1");
+        let mut profile = Profile {
+            allow_ai: true,
+            lock_ai_markers: Some(vec![MARKER.into()]),
+            ..Default::default()
+        };
+        for session in ["first", "second"] {
+            std::env::set_var("AWZARS_SESSION_ID", session);
+            assert!(matches!(
+                enforce_in_boot("persistent", &profile, false, false, None),
+                Ok(GateOutcome::NotLocked)
+            ));
+        }
+        profile.allow_ai = false;
+        assert!(matches!(
+            enforce("persistent", &profile, false, false),
+            Err(AwzarsError::AiContextBlocked { .. })
+        ));
+        profile.allow_ai = true;
+        profile.lock_verifier = Some(TEST_VERIFIER.into());
+        assert!(enforce("persistent", &profile, false, false).is_err());
+        write_unlock("persistent", 3600, false, true, Some(TEST_VERIFIER)).unwrap();
+        assert!(is_already_unlocked(enforce(
+            "persistent",
+            &profile,
+            false,
+            false
+        )));
+        profile.allow_ai = false;
+        assert!(enforce("persistent", &profile, false, false).is_err());
+        profile.allow_ai = true;
+        profile.lock_verifier = Some(TEST_VERIFIER_2.into());
+        assert!(enforce("persistent", &profile, false, false).is_err());
+        profile.lock_verifier = Some(TEST_VERIFIER.into());
+        std::env::set_var("AWZARS_SESSION_ID", "third");
+        assert!(enforce("persistent", &profile, false, false).is_err());
+        std::env::remove_var(MARKER);
+        std::env::remove_var("AWZARS_SESSION_ID");
     }
 
     #[test]

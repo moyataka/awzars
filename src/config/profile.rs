@@ -58,7 +58,7 @@ pub struct Profile {
     /// Argon2id PHC string. `Some(_)` means the profile is password-locked;
     /// credential operations require a prior `awzars unlock <profile>` in the
     /// same terminal session. `None` means no password — but AI agents in the
-    /// session still need a one-time consent (see `auth::lock`).
+    /// session still need consent unless `allow_ai` is enabled (see `auth::lock`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_verifier: Option<String>,
 
@@ -70,6 +70,10 @@ pub struct Profile {
     /// `Some(vec![])` disables AI detection for this profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_ai_markers: Option<Vec<String>>,
+
+    /// Persistent AI consent across sessions; does not bypass password locks.
+    #[serde(default)]
+    pub allow_ai: bool,
 
     /// Explicit operator opt-in; independent of the normal profile lock.
     #[serde(default)]
@@ -96,6 +100,7 @@ impl Profile {
             lock_verifier: None,
             lock_ttl_hours: None,
             lock_ai_markers: None,
+            allow_ai: false,
             mcp_readonly_accessible: false,
             read_only: None,
         }
@@ -253,6 +258,17 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_ai_consent_defaults_off_and_round_trips() {
+        let document = "[azure]\ntenant_id = 'tenant'\napp_id_uri = 'urn:amazon:webservices'\n";
+        let mut profile: Profile = toml::from_str(document).unwrap();
+        assert!(!profile.allow_ai);
+        profile.allow_ai = true;
+        let saved = toml::to_string(&profile).unwrap();
+        assert!(toml::from_str::<Profile>(&saved).unwrap().allow_ai);
+        assert!(toml::from_str::<Profile>(&format!("allow_ai = 'true'\n{document}")).is_err());
+    }
 
     #[test]
     fn mcp_access_requires_explicit_boolean_opt_in() {
