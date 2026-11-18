@@ -91,7 +91,7 @@ directories = "6.0"
 zeroize = { version = "1.8", features = ["derive"] }
 
 # Defer interruption until browser and terminal cleanup completes.
-signal-hook = "0.3"
+signal-hook = "0.4"
 
 # Cookie store encryption
 chacha20poly1305 = "0.10"
